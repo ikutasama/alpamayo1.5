@@ -1,5 +1,5 @@
 _target_: finetune.sft.models.sft_alpamayo1_5.TrainableAlpamayo1_5.from_pretrained
-pretrained_model_name_or_path: nvidia/Alpamayo-1.5-8B
+pretrained_model_name_or_path: /data/mnt_m181/z59900495/workspace/model/Alpamayo-1.5-10B #nvidia/Alpamayo-1.5-8B
 dtype: auto
 cotrain_vlm: false
 stage1_vlm_checkpoint_path: null

@@ -9,16 +9,16 @@ data:
   train_dataset:
     _recursive_: false
     _target_: alpamayo1_5.data.pai.PAIDataset
-    local_dir: ???
-    chunk_ids: "0-99"
+    local_dir: /data/mnt_m181/z59900495/workspace/DownloadTool-master/pai_dataset
+    chunk_ids: "0-299"
     use_default_keyframe: true
     vla_preprocess_args:
       generation_mode: false
   val_dataset:
     _recursive_: false
     _target_: alpamayo1_5.data.pai.PAIDataset
-    local_dir: ???
-    chunk_ids: "99-100"
+    local_dir: /data/mnt_m181/z59900495/workspace/DownloadTool-master/nvidia/PhysicalAI-Autonomous-Vehicles/Germany_1000
+    chunk_ids: "3116-3132"
     use_default_keyframe: true
     vla_preprocess_args:
       generation_mode: true
@@ -41,8 +41,8 @@ evaluate:
 trainer:
   output_dir: ${paths.output_dir}
   per_device_train_batch_size: 1
-  per_device_eval_batch_size: 2
-  gradient_accumulation_steps: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 2 # 1，影响显存
   learning_rate: 1e-4
   warmup_steps: 100
   logging_steps: 5
@@ -51,7 +51,7 @@ trainer:
   num_train_epochs: 3
   bf16: True
   dataloader_pin_memory: True
-  dataloader_num_workers: 2
+  dataloader_num_workers: 4 #2
   remove_unused_columns: False
   report_to: none # change to "wandb" when enabling W&B
   lr_scheduler_type: cosine_warmup_with_min_lr
