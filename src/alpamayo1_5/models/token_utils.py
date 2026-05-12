@@ -85,6 +85,13 @@ def extract_traj_tokens(
     valid_mask = (range_tensor > start_positions.unsqueeze(1)) & (
         range_tensor < end_positions.unsqueeze(1)
     )
+    # # --- 修改点 2: 优化 valid_mask 逻辑 ---
+    # forced_end_pos = start_positions + tokens_per_future_traj + 1
+    # actual_effective_end = torch.min(end_positions, forced_end_pos)
+    # valid_mask = (range_tensor > start_positions.unsqueeze(1)) & (
+    #     range_tensor < actual_effective_end.unsqueeze(1)
+    # )
+    # # --- 修改结束 ---
     extracted_tokens = torch.where(valid_mask, output_tokens, torch.zeros_like(output_tokens))
 
     # Check for mismatches in token count
@@ -137,9 +144,21 @@ def extract_between_special_tokens(decoded_batch: list[str], token: str) -> list
     apnd = out.append
     for s in decoded_batch:
         before_end, sep, _ = s.partition(end_token)
+        # if not sep:
+        #     apnd("")
+        #     continue
+        # --- 修改点 1: 容错处理 ---
         if not sep:
-            apnd("")
+            # 如果没有结尾，查找开始标签的位置
+            start_idx = s.rfind(start_token)
+            if start_idx != -1:
+                # 提取开始标签之后直到末尾的所有内容
+                apnd(s[start_idx + len(start_token):].strip())
+            else:
+                # 连开始标签都没有，才返回空
+                apnd("")
             continue
+        # --- 修改结束 ---
         i = before_end.rfind(start_token)
         if i != -1:
             apnd(before_end[i + len(start_token) :].strip())
