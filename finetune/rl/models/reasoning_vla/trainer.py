@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import logging
 from typing import Any, Dict, List
 
 import cosmos_rl.utils.distributed as dist_util
@@ -26,13 +27,34 @@ from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 from cosmos_rl.utils.util import compute_mfu, is_master_rank
+from torch.utils.tensorboard import SummaryWriter
 
 from rl.base_trainer import AlpamayoGRPOTrainer
+
+for _logger_name in ["cosmos", "cosmos_rl", "vllm", "transformers"]:
+    _l = logging.getLogger(_logger_name)
+    _l.setLevel(logging.WARNING)
+    for _h in _l.handlers:
+        _h.setLevel(logging.WARNING)
+logging.getLogger().setLevel(logging.WARNING)
+
+_TB_WRITER = None
+
+
+def _get_tb_writer(log_dir: str) -> SummaryWriter:
+    global _TB_WRITER
+    if _TB_WRITER is None:
+        _TB_WRITER = SummaryWriter(log_dir=log_dir)
+    return _TB_WRITER
 
 
 @TrainerRegistry.register(trainer_type="reasoning_vla_grpo")
 class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
     """GRPO trainer for reasoning VLA models."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._tb_writer = None
 
     def step_training(
         self,
@@ -64,7 +86,7 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
-        logger.debug("[Policy] Prepare training data.")
+        logger.info("[Policy] Prepare training data.")
         self.metrics = {
             "entropy": 0.0,
             "effective_entropy": 0.0,
@@ -73,7 +95,6 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         completions_list = [rollout.completion for rollout in rollouts]
         advantages_list = [rollout.advantage for rollout in rollouts]
 
-        # Optional Positive-NLL support: only compute flags when coefficient > 0
         pos_coef_global = self.config.train.train_policy.positive_nll_coef
         if pos_coef_global is not None and pos_coef_global > 0.0:
             rewards_list = [rollout.reward for rollout in rollouts]
@@ -95,6 +116,7 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         ]
 
         advantages_t = torch.tensor(advantages_list).to(self.device)
+
         batch_size = len(rollouts)
         mini_batch_size = min(self.mini_batch, batch_size) if self.mini_batch > 0 else batch_size
         assert batch_size % mini_batch_size == 0, (
@@ -102,7 +124,6 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         )
         num_mini_batch = batch_size // mini_batch_size
 
-        # Initialize placeholder for old per-token logprobs
         self.old_per_token_logps = [None for _ in range(num_mini_batch)]
         self.ref_per_token_logps = [None for _ in range(num_mini_batch)]
 
@@ -116,12 +137,10 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         loss_count = 0
         is_computing_refs = [True, False] if need_compute_ref else [False]
         for is_computing_ref in is_computing_refs:
-            # Set model to eval mode if reference model is being used
             if is_computing_ref:
                 self.model.eval()
             else:
                 if need_compute_ref:
-                    # Swap model state dict back to the original model
                     need_compute_ref = False
                     self._swap_model_state_dict()
                 self.model.train()
@@ -132,8 +151,6 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                     with torch.cuda.stream(self.train_stream):
                         for i in range(0, batch_size, mini_batch_size):
                             end = min(i + mini_batch_size, batch_size)
-                            # Convert advantages from [batch_size] -> [batch_size, max_len]
-                            # by expanding along the sequence dimension.
 
                             minibatched_processed_samples = processed_samples[i:end]
 
@@ -162,9 +179,6 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                                 computed_max_len=computed_max_len,
                             )
 
-                            # TP/CP will shard the sequence dimension into n-ranks.
-                            # The interested_tokens will be unevenly distributed across ranks.
-                            # So do not enable interested_tokens in TP.
                             if (
                                 self.parallel_dims.dp_shard_coord[1]
                                 == self.parallel_dims.world_size
@@ -173,12 +187,10 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                                     "logprob_masks"
                                 ]
 
-                            # Move all tensor to device
                             for k, v in list(user_mini_batch.items()):
                                 if isinstance(v, torch.Tensor) and v.device != self.device:
                                     user_mini_batch[k] = v.to(self.device)
 
-                            # input_ids are different across ranks in dp_shard_cp
                             position_ids, input_ids, pos_seq_dim = self.model.get_position_ids(
                                 **user_mini_batch
                             )
@@ -208,13 +220,11 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                                 model_out = self.model(**user_mini_batch)
 
                                 if self.parallel_dims.cp_enabled:
-                                    # reset the position ids and input ids
                                     user_mini_batch["position_ids"] = position_ids_before_cp
                                     user_mini_batch["input_ids"] = input_ids_before_cp
                                     if padding_mask_before_cp is not None:
                                         user_mini_batch["padding_mask"] = padding_mask_before_cp
 
-                                # Support HF ModelOutput or raw Tensor.
                                 raw_logits = (
                                     model_out.logits if hasattr(model_out, "logits") else model_out
                                 )
@@ -222,9 +232,7 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                                     raw_logits = (
                                         raw_logits / self.config.train.train_policy.temperature
                                     )
-                                # returned shape:
-                                # current_per_token_logprobs: [n_tokens_of_logprobs]
-                                # cu_seqlens: [batch_size + 1]
+
                                 current_per_token_logprobs, cu_seqlens, metrics = (
                                     self.compute_logprobs(
                                         user_mini_batch,
@@ -237,13 +245,11 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                                 logprob_masks = user_mini_batch["logprob_masks"]
                                 current_advantages = logprob_masks * minibatched_advantages
 
-                                # Compute ref per-token logprobs if needed
                                 if is_computing_ref:
                                     assert i_mu == 0, "Only first iteration should compute ref"
                                     self.ref_per_token_logps[local_mini_step] = (
                                         current_per_token_logprobs.detach()
                                     )
-                                    # Skip the rest of the loop
                                     local_mini_step += 1
                                     continue
                                 else:
@@ -274,7 +280,6 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                                         ddp_comm=inter_policy_nccl,
                                     )
 
-                                    # Positive Example LM Loss
                                     if pos_coef_global is not None and pos_coef_global > 0.0:
                                         pos_flag_batch = self._positive_flags_t[i:end]
                                         pos_mask = pos_flag_batch.unsqueeze(1).expand_as(
@@ -315,7 +320,6 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         self.ref_per_token_logps = []
         end_event.record()
 
-        # Only step lr scheduler when all the mini-batches are processed
         self.lr_schedulers.step()
 
         loss = (loss_sum / loss_count) if loss_count > 0 else loss_sum
@@ -325,15 +329,9 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
             or self.parallel_dims.dp_shard_enabled
             or self.parallel_dims.cp_enabled
         ):
-            global_avg_loss, global_max_loss = (  # noqa: F841
-                dist_util.dist_mean(loss, self.parallel_dims.mesh["dp_cp"]),
-                dist_util.dist_max(loss, self.parallel_dims.mesh["dp_cp"]),
-            )
+            global_avg_loss = global_max_loss = loss.item()
             if self.config.train.train_policy.kl_beta != 0.0:
-                global_avg_kl_loss, global_max_kl_loss = (  # noqa: F841
-                    dist_util.dist_mean(kl_loss, self.parallel_dims.mesh["dp_cp"]),
-                    dist_util.dist_max(kl_loss, self.parallel_dims.mesh["dp_cp"]),
-                )
+                global_avg_kl_loss = global_max_kl_loss = kl_loss.item()
         else:
             global_avg_loss = global_max_loss = loss.item()  # noqa: F841
             if self.config.train.train_policy.kl_beta != 0.0:
@@ -343,9 +341,8 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         if self.config.logging.logger:
             if is_master_rank(self.parallel_dims, self.global_rank):
                 report_data = {"train_step": current_step}
-                # Calculate the iteration time
                 assert end_event.query()
-                iter_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
+                iter_time = start_event.elapsed_time(end_event) / 1000.0
                 report_data["train/iteration_time"] = iter_time
                 report_data["train/loss_avg"] = global_avg_loss
                 report_data["train/loss_max"] = global_max_loss
@@ -354,6 +351,10 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                     report_data["train/kl_loss_avg"] = global_avg_kl_loss
                     report_data["train/kl_loss_max"] = global_max_kl_loss
                 report_data["train/grad_norm"] = grad_norm_sum.item()
+                report_data["train/local_loss"] = loss.item()
+                report_data["train/reward_mean"] = advantages_t.mean().item()
+                report_data["train/reward_std"] = advantages_t.std().item()
+                print(f"[Step {current_step}] loss={loss.item():.6f}, reward={advantages_t.mean().item():.4f}, gn={grad_norm_sum.item():.4f}")
 
                 if self.config.logging.report_mfu:
                     mfu = compute_mfu(
@@ -370,18 +371,23 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                         report_data[f"train/{k}"] = (
                             v.item() if isinstance(v, torch.Tensor) else v
                         ) / loss_count
+
+                tb_dir = os.path.join(os.environ.get("LOG_DIR", "/root/temp_log"), "tensorboard")
+                writer = _get_tb_writer(tb_dir)
+                for key, val in report_data.items():
+                    if isinstance(val, (int, float)):
+                        writer.add_scalar(key, val, current_step)
+                writer.flush()
+
         self._save_checkpoint(current_step, total_steps, remain_samples_num, is_master_replica)
         return report_data
 
     @property
     def pp_loss_fn(self):
-        """Return a pipeline-parallel loss function that averages per-token losses."""
-
         def fake_compute_loss(
             loss: torch.Tensor,
             target: torch.Tensor,
         ) -> torch.Tensor:
-            """loss: the loss of shape `[n_tokens]`"""
             return loss.mean()
 
         return fake_compute_loss

@@ -18,7 +18,7 @@ redis = "12800"
 [train]
 resume = false
 epoch = 15
-output_dir = "/path/to/alpamayo_cosmos_rl_job/outputs"
+output_dir = "/data/mnt_m181/z59900495/workspace/alpamayo1.5/output_rl/0425"
 epsilon = 1e-6
 optm_name = "AdamW"
 optm_lr = 2e-6
@@ -51,7 +51,7 @@ n_generation = 6
 
 [rollout]
 backend = "reasoning_vla_vllm_rollout"
-gpu_memory_utilization = 0.8
+gpu_memory_utilization = 0.7
 enable_chunked_prefill = false
 n_generation = 12
 batch_size = 2
@@ -62,15 +62,18 @@ seed = 42
 temperature = 0.6
 top_p = 0.98
 repetition_penalty = 1
+# stop_strings = ["<|traj_future_end|>", "<|endoftext|>"]
+max_new_tokens = 256  # 由于不止是轨迹了，128个不够，cot+meta+traj，必须大于你的 action token 数量
 
 [policy]
 # ReasoningVLA HF checkpoint directory (must include ReasoningVLAConfig)
-model_name_or_path = "/path/to/converted_alpamayo_model"
+model_name_or_path = "/data/mnt_m181/z59900495/workspace/alpamayo1.5/temp_model"
 model_max_length = 4096
 model_gradient_checkpointing = true
 
 [logging]
-logger = ['console', 'wandb']
+logger = ['console', 'tensorboard']
+log_level = "INFO"
 project_name = "Alpamayo_RL"
 experiment_name = "RVLA_Post_Training"
 
