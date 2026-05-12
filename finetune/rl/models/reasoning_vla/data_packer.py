@@ -228,6 +228,10 @@ class RVLADataPacker(BaseRLDataPacker):
         data_dict["ego_rollout_xyz"] = predicted_fut_xyz
         data_dict["ego_rollout_rot"] = predicted_fut_rot
 
+        #debug
+        print(f"[DEBUG] gen_ids.numel()={gen_ids.numel()}, labels_mask exists={'labels_mask' in tokenized}")
+        print(f"[DEBUG] rollout_output[:50]={rollout_output[:50]}")
+
         return data_dict
 
     def policy_compute_max_len(self, processed_samples: list[Any]) -> int:

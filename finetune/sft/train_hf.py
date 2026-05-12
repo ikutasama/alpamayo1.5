@@ -29,6 +29,9 @@ from alpamayo1_5.common import config_utils
 from alpamayo1_5.common import wandb_utils
 from alpamayo1_5.common.logging import setup_logging
 
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 setup_logging()
 
 logger = logging.RankedLogger("train", rank_zero_only=True)

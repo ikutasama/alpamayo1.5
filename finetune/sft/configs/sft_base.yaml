@@ -10,7 +10,7 @@ data:
     _recursive_: false
     _target_: alpamayo1_5.data.pai.PAIDataset
     local_dir: /data/mnt_m181/z59900495/workspace/DownloadTool-master/pai_dataset
-    chunk_ids: "0-299"
+    chunk_ids: "0-400"
     use_default_keyframe: true
     vla_preprocess_args:
       generation_mode: false
@@ -53,7 +53,7 @@ trainer:
   dataloader_pin_memory: True
   dataloader_num_workers: 4 #2
   remove_unused_columns: False
-  report_to: none # change to "wandb" when enabling W&B
+  report_to: wandb # change to "wandb" when enabling W&B
   lr_scheduler_type: cosine_warmup_with_min_lr
   lr_scheduler_kwargs:
     min_lr: 1e-6
