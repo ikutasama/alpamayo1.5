@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alpamayo 1.5 强化学习科研计划：CoC × Flow Matching 联合优化</title>
+  <style>
+    :root {
+      --ink: #1b2430;
+      --muted: #5a6778;
+      --line: #d9e1ea;
+      --paper: #f6f8fb;
+      --panel: #ffffff;
+      --blue: #285f9f;
+      --green: #31715e;
+      --red: #9b3d45;
+      --gold: #8a651c;
+      --violet: #5a4f91;
+      --code: #f0f3f7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+      line-height: 1.62;
+    }
+    header {
+      background: #0e253b;
+      color: white;
+      padding: 48px 28px 36px;
+      border-bottom: 5px solid #6fbf9a;
+    }
+    header .wrap, main {
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+    h1 {
+      margin: 0 0 14px;
+      font-size: clamp(30px, 4.2vw, 54px);
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+    .subtitle {
+      max-width: 980px;
+      margin: 0;
+      font-size: 18px;
+      color: #dce9f5;
+    }
+    main { padding: 28px; }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 24px;
+      margin: 0 0 22px;
+      box-shadow: 0 8px 24px rgba(32, 42, 56, 0.04);
+    }
+    h2 {
+      margin: 0 0 14px;
+      font-size: 25px;
+      letter-spacing: 0;
+    }
+    h3 {
+      margin: 20px 0 8px;
+      font-size: 19px;
+      letter-spacing: 0;
+    }
+    p { margin: 8px 0 12px; }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      background: var(--code);
+      border: 1px solid #dfe5ec;
+      padding: 1px 5px;
+      border-radius: 5px;
+      font-family: "Cascadia Mono", Consolas, monospace;
+      font-size: 0.92em;
+    }
+    .grid {
+      display: grid;
+      gap: 14px;
+    }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .tile {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      background: #fbfcfe;
+    }
+    .tile strong { display: block; margin-bottom: 6px; }
+    .tag {
+      display: inline-block;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 9px;
+      margin: 2px 4px 2px 0;
+      font-size: 12px;
+      color: var(--muted);
+      background: white;
+    }
+    .score {
+      display: grid;
+      grid-template-columns: 170px 1fr;
+      gap: 10px;
+      align-items: center;
+      margin: 8px 0;
+    }
+    .bar {
+      height: 12px;
+      border-radius: 99px;
+      background: #e6ebf1;
+      overflow: hidden;
+    }
+    .bar > span {
+      display: block;
+      height: 100%;
+      border-radius: 99px;
+      background: var(--green);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      vertical-align: top;
+      text-align: left;
+    }
+    th {
+      background: #edf2f7;
+      font-weight: 700;
+    }
+    .callout {
+      border-left: 5px solid var(--blue);
+      background: #eef5fc;
+      padding: 12px 14px;
+      border-radius: 6px;
+      margin: 12px 0;
+    }
+    .callout.green { border-left-color: var(--green); background: #eef8f4; }
+    .callout.gold { border-left-color: var(--gold); background: #fbf6e8; }
+    .callout.red { border-left-color: var(--red); background: #fbf0f1; }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(130px, 1fr));
+      gap: 10px;
+      margin: 14px 0;
+    }
+    .step {
+      position: relative;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: #fbfcfe;
+      min-height: 112px;
+    }
+    .step:not(:last-child)::after {
+      content: ">";
+      position: absolute;
+      top: 38px;
+      right: -10px;
+      color: var(--muted);
+      font-weight: 700;
+      background: var(--paper);
+    }
+    .formula {
+      overflow-x: auto;
+      background: #111827;
+      color: #e5edf7;
+      border-radius: 8px;
+      padding: 14px 16px;
+      font-family: "Cascadia Mono", Consolas, monospace;
+      font-size: 14px;
+      white-space: pre;
+    }
+    .rank {
+      display: inline-flex;
+      justify-content: center;
+      align-items: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: var(--blue);
+      color: white;
+      font-weight: 700;
+      margin-right: 8px;
+    }
+    .refs li { margin-bottom: 8px; }
+    @media (max-width: 860px) {
+      .grid.two, .grid.three, .flow { grid-template-columns: 1fr; }
+      .step:not(:last-child)::after { display: none; }
+      .score { grid-template-columns: 1fr; }
+      main { padding: 16px; }
+      section { padding: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>Alpamayo 1.5 强化学习科研计划</h1>
+      <p class="subtitle">面向 ICLR/AAAI 级别投稿的改进方向：把 Chain-of-Causation 推理、离散轨迹 token 和连续 Flow Matching action expert 放进一个可验证、可消融、可实现的联合 RL 框架。</p>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <h2>0. 一句话结论</h2>
+      <div class="callout green">
+        <strong>最建议主线：Causal Flow-GRPO。</strong>
+        现有仓库的 RL 只优化 VLM 生成的 CoC 文本和离散轨迹 token，reward 主要由 ADE 与 comfort 组成；而 Alpamayo 1.5 的核心卖点恰恰是 CoC reasoning + diffusion/flow action expert。论文创新点可以放在“联合信用分配”：让 CoC 解释、离散 token 轨迹、连续 flow trajectory 三者共享同一个可验证 reward，却在不同 token/模块上接受不同的优势函数。
+      </div>
+      <div class="grid three">
+        <div class="tile">
+          <strong>当前可落地性</strong>
+          <span class="tag">低侵入</span><span class="tag">Cosmos-RL 兼容</span><span class="tag">先 reward 后 trainer</span>
+          <p>从 <code>finetune/rl/rewards/aggregated_reward.py</code> 和 <code>finetune/rl/models/reasoning_vla/trainer.py</code> 开始改，不需要第一步就重写 rollout 框架。</p>
+        </div>
+        <div class="tile">
+          <strong>论文差异化</strong>
+          <span class="tag">CoC × Action</span><span class="tag">Flow RL</span><span class="tag">long-tail driving</span>
+          <p>已有工作分别强化 reasoning 或 flow action；我们强调 causal explanation 与 continuous action decoder 的联合后训练。</p>
+        </div>
+        <div class="tile">
+          <strong>实验闭环</strong>
+          <span class="tag">open-loop</span><span class="tag">closed-loop</span><span class="tag">reasoning judge</span>
+          <p>先在 8×A100 跑 GRPO reward 改造，再接 flow head RL，最后做长尾场景分组与 ablation。</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>1. 背景判断：为什么这里有论文机会</h2>
+      <div class="flow">
+        <div class="step"><strong>输入</strong><br>多摄像头历史图像、导航文本、ego history。</div>
+        <div class="step"><strong>CoC</strong><br>VLM 先产生因果解释，说明场景、风险、决策依据。</div>
+        <div class="step"><strong>离散轨迹 token</strong><br>当前 RL 解析 <code>&lt;|traj_future_start|&gt;</code> 到 <code>&lt;|traj_future_end|&gt;</code> 的 token。</div>
+        <div class="step"><strong>Flow action expert</strong><br>SFT stage2 用 flow matching 学连续 action vector field。</div>
+        <div class="step"><strong>Reward</strong><br>现有实现主要看 ADE 和 comfort，还没有真正联合 CoC 与 flow head。</div>
+      </div>
+      <p>Alpamayo 1.5 模型卡明确写到模型基于 Cosmos-Reason2 VLM 和 diffusion-based trajectory decoder，输出包括 CoC reasoning traces 与 6.4 秒未来轨迹；轨迹内部表示为 unicycle model 下的 acceleration/curvature 动态 action。也就是说，这个模型天然不是“只会吐 token 的 LLM”，而是一个有可解释推理和连续控制头的 VLA。</p>
+      <p>文献趋势也正好卡在这里：VLA-R1 用 RLVR + GRPO 强化 reasoning 与 execution；FPO、π_RL 等工作说明 flow-based VLA 可以做 RL，但核心难点是 action likelihood 或 importance ratio 难算。当前仓库正好有一个实际系统级空缺：<strong>如何把 CoC 的离散语言 RL 和 flow matching 的连续动作 RL 统一起来。</strong></p>
+    </section>
+
+    <section>
+      <h2>2. 现有代码瓶颈</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>位置</th>
+            <th>当前行为</th>
+            <th>科研缺口</th>
+            <th>可改入口</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>finetune/rl/rewards/aggregated_reward.py</code></td>
+            <td>decode rollout 轨迹，计算 ADE 与 comfort，ADE 超阈值直接 -1。</td>
+            <td>没有评价 CoC 是否说对；没有评价 CoC 与 action 是否一致；reward 太稀疏。</td>
+            <td>新增 CoC parser、causal verifier、risk reward、reward breakdown。</td>
+          </tr>
+          <tr>
+            <td><code>finetune/rl/models/reasoning_vla/trainer.py</code></td>
+            <td>Cosmos GRPO 对所有 completion token 使用同一个 advantage。</td>
+            <td>CoC token、格式 token、轨迹 token 承担不同责任，却被同一个标量推。</td>
+            <td>新增 token-type masks 与分量 advantage：reasoning_adv、traj_adv、joint_adv。</td>
+          </tr>
+          <tr>
+            <td><code>src/alpamayo1_5/diffusion/flow_matching.py</code></td>
+            <td>stage2 只做监督 flow matching MSE。</td>
+            <td>RL 没有更新 action expert；无法直接优化 closed-loop/risk reward。</td>
+            <td>引入 FPO-style advantage-weighted conditional flow objective。</td>
+          </tr>
+          <tr>
+            <td><code>finetune/rl/toml/alpamayo_rvla_rl_local_test.toml</code></td>
+            <td>reward 配置只有 <code>traj_l2_weight</code> 与 <code>comfort_weight</code>。</td>
+            <td>缺少实验开关，不能做可靠 ablation。</td>
+            <td>增加 <code>coc_reward</code>、<code>risk_reward</code>、<code>flow_rl</code>、<code>advantage_routing</code> 配置。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>3. 创新 Idea 排序</h2>
+
+      <h3><span class="rank">1</span>Causal Flow-GRPO：CoC 与 Flow Action 的联合信用分配</h3>
+      <p><strong>核心想法：</strong>把一次 rollout 的 reward 拆成四个分量：CoC 可验证性、离散轨迹准确性、连续 flow 轨迹质量、CoC-action 一致性。训练时不再把一个标量 advantage 粗暴施加给所有 completion token，而是按 token 类型路由 advantage：CoC token 主要吃 reasoning reward，轨迹 token 主要吃 trajectory reward，二者共同吃 consistency reward。</p>
+      <div class="formula">R = w_r R_coc + w_d R_discrete_traj + w_f R_flow_traj + w_c R_consistency - w_k KL(pi || pi_ref)
+A_token =
+  CoC tokens:       norm(R_coc + R_consistency)
+  traj tokens:      norm(R_discrete_traj + R_consistency)
+  flow expert:      norm(R_flow_traj + R_consistency)</div>
+      <p><strong>为什么新：</strong>VLA-R1 强调 reasoning RLVR，但不处理 Alpamayo 1.5 这种 continuous flow expert；FPO/π_RL 处理 flow policy RL，但通常不把可解释 CoC 当作需要被 causal credit assignment 约束的中间决策变量。这个方向把两条线接起来。</p>
+      <p><strong>代码落点：</strong>先在 <code>data_packer.py</code> 输出 token masks，再在 <code>trainer.py</code> 构造 per-token advantage map；reward 分量由 <code>aggregated_reward.py</code> 返回，并进入 rollout metadata。</p>
+
+      <h3><span class="rank">2</span>Counterfactual CoC Reward：因果解释必须能改变动作</h3>
+      <p><strong>核心想法：</strong>对模型生成的 CoC 做结构化解析：主体、风险、因果触发、决策意图。构造轻量 counterfactual，例如“前车 cut-in 不存在”“导航要求右转变为直行”“行人不在本车道”。如果 CoC 声称某因素是决策原因，那么去掉/替换该因素后，轨迹应该出现方向、速度或安全距离上的可解释变化。</p>
+      <div class="formula">R_cf = sim(Delta action, expected_delta(causal_edit)) - penalty(spurious_cause)
+spurious_cause: CoC mentions a causal factor that has no measurable action effect</div>
+      <p><strong>为什么新：</strong>普通 LLM judge 容易奖励“说得像”，但自动驾驶需要“说的原因真的驱动了规划”。这个 reward 可以把可解释性从文字质量推进到行为因果性，适合长尾驾驶场景。</p>
+      <p><strong>代码落点：</strong>新增 <code>finetune/rl/rewards/coc_reward.py</code> 与 <code>causal_consistency_reward.py</code>。第一版不用在线调用大模型，可以先用规则、轨迹变化和已有 reference 字段做 verifiable reward。</p>
+
+      <h3><span class="rank">3</span>Flow Policy Optimization for Alpamayo：让 action expert 进入 RL</h3>
+      <p><strong>核心想法：</strong>在 stage2 SFT 之后，让 diffusion/flow action expert 接受 reward fine-tuning。由于 flow matching 的 action likelihood 难精确计算，可借鉴 FPO：用 conditional flow matching loss 的变化近似 policy ratio，做 clipped surrogate objective，并保留 SFT/参考模型 KL 或 MSE anchor。</p>
+      <div class="formula">ratio_proxy = exp(-L_flow(theta; x, t, noise) + L_flow(theta_old; x, t, noise))
+L_FPO = - min(ratio_proxy * A, clip(ratio_proxy, 1-eps, 1+eps) * A)
+      + beta_ref * ||v_theta - v_ref||^2</div>
+      <p><strong>为什么新：</strong>当前 Alpamayo RL 路径主要更新 VLM 离散生成；但 Alpamayo 1.5 模型结构中 action expert 有 2.3B 参数，是连续控制质量的关键。把它纳入 RL 是最直接的性能上限来源。</p>
+      <p><strong>代码落点：</strong>新增 flow RL trainer 或在 SFT stage2 trainer 后加 RL mode；复用 <code>FlowMatching.construct_training_data()</code> 与 <code>compute_loss_from_pred()</code>，加入 old/ref expert 缓存。</p>
+
+      <h3><span class="rank">4</span>Tail-Risk GRPO：按长尾危险度重塑 advantage</h3>
+      <p><strong>核心想法：</strong>不要让普通直行样本主导 advantage。对 scenario 做 risk bin：cut-in、crosswalk、intersection、adverse weather、off-road risk。组内 GRPO 改为 difficulty-aware normalization，并用 CVaR 风格的 tail reward 强化最差分位数。</p>
+      <p><strong>为什么新：</strong>Alpamayo-R1 的公开摘要强调 long-tail 场景和 closed-loop 安全收益；当前仓库 reward 是单样本 ADE + comfort，缺少面向长尾失败的优化目标。</p>
+      <p><strong>代码落点：</strong>在 prefetch/dataset 或 reward metadata 中输出 risk tag，trainer 中按 risk group 汇总 reward，并记录 per-risk W&B/TensorBoard 指标。</p>
+
+      <h3><span class="rank">5</span>Self-Consistency as Reward：多样本 CoC/轨迹一致性</h3>
+      <p><strong>核心想法：</strong>同一个 prompt 生成 K 条 CoC + 轨迹，不只比较 reward 高低，还计算解释一致性、轨迹 mode collapse、多模态覆盖率。对于本来存在多种合理驾驶策略的场景，奖励“安全多模态”；对于确定性场景，奖励“低方差稳定”。</p>
+      <p><strong>为什么新：</strong>GRPO 已经天然对同 prompt 多采样；我们可以把多样本统计变成 reward，不需要额外 rollout 架构。</p>
+    </section>
+
+    <section>
+      <h2>4. 推荐实施路线</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>阶段</th>
+            <th>目标</th>
+            <th>代码变更</th>
+            <th>服务器实验</th>
+            <th>风险</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Phase 1</td>
+            <td>不改模型，只增强 reward logging 与可解释指标。</td>
+            <td>新增 reward breakdown、CoC parser、trajectory/risk metrics。</td>
+            <td>跑 1k-5k rollout sanity，确认 reward 分布不塌。</td>
+            <td>低</td>
+          </tr>
+          <tr>
+            <td>Phase 2</td>
+            <td>Causal Flow-GRPO 的离散版本：CoC/traj token 分开 advantage。</td>
+            <td><code>data_packer.py</code> 输出 masks；<code>trainer.py</code> 支持 per-token advantage。</td>
+            <td>对比 baseline GRPO、CoC reward only、traj reward only、joint reward。</td>
+            <td>中</td>
+          </tr>
+          <tr>
+            <td>Phase 3</td>
+            <td>Flow action expert RL fine-tuning。</td>
+            <td>新增 flow RL objective、old/ref expert、FPO-style clipping。</td>
+            <td>先冻结 VLM，仅训 action expert LoRA/adapter；再联合少量解冻。</td>
+            <td>中高</td>
+          </tr>
+          <tr>
+            <td>Phase 4</td>
+            <td>长尾与 closed-loop 论文实验。</td>
+            <td>按 risk group 采样、CVaR reward、指标导出。</td>
+            <td>open-loop minADE/FDE、comfort、off-road proxy、closed-loop AlpaSim。</td>
+            <td>中</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="callout gold">
+        <strong>最小可发表路径：</strong>
+        Phase 1 + Phase 2 就能形成一篇“reasoning-action credit assignment for VLA RL”的短周期论文主线；Phase 3 是冲更高贡献的关键，但实现和调参成本更高。
+      </div>
+    </section>
+
+    <section>
+      <h2>5. 实验矩阵</h2>
+      <div class="grid two">
+        <div class="tile">
+          <strong>主要 baseline</strong>
+          <p>1. SFT-only Alpamayo 1.5。<br>2. 当前 GRPO：ADE + comfort。<br>3. CoC reward only。<br>4. Flow expert supervised fine-tuning only。<br>5. Causal Flow-GRPO full。</p>
+        </div>
+        <div class="tile">
+          <strong>核心指标</strong>
+          <p>Open-loop：minADE_6、FDE、jerk、yaw rate、trajectory validity。<br>Reasoning：CoC judge score、format pass rate、causal consistency。<br>Closed-loop：off-road、collision/close encounter、route progress、AlpaSim score。</p>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>实验</th>
+            <th>验证问题</th>
+            <th>预期现象</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Token advantage routing ablation</td>
+            <td>同一个 reward 是否应该推所有 token？</td>
+            <td>per-token routing 降低格式崩坏，提高 CoC-action consistency。</td>
+          </tr>
+          <tr>
+            <td>Counterfactual reward ablation</td>
+            <td>CoC 是否只是好看的解释？</td>
+            <td>加入 counterfactual 后，危险场景 close encounter/off-road proxy 降低。</td>
+          </tr>
+          <tr>
+            <td>Flow RL ablation</td>
+            <td>只训离散 VLM 是否限制连续轨迹质量？</td>
+            <td>Flow expert RL 对 comfort、FDE、closed-loop stability 更明显。</td>
+          </tr>
+          <tr>
+            <td>Risk-bin generalization</td>
+            <td>是否真的改善长尾？</td>
+            <td>普通场景不退化，cut-in/intersection/pedestrian bins 提升更大。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>6. 论文包装建议</h2>
+      <div class="grid three">
+        <div class="tile">
+          <strong>标题候选 A</strong>
+          <p>Causal Flow-GRPO: Joint Reasoning-Action Reinforcement Learning for Flow-Based Driving VLAs</p>
+        </div>
+        <div class="tile">
+          <strong>标题候选 B</strong>
+          <p>When Explanations Drive Actions: Causally Consistent RL for Chain-of-Causation VLAs</p>
+        </div>
+        <div class="tile">
+          <strong>标题候选 C</strong>
+          <p>Rewarding What Matters: Token- and Flow-Level Credit Assignment for Autonomous Driving VLAs</p>
+        </div>
+      </div>
+      <p><strong>可主张的贡献：</strong></p>
+      <p>1. 提出 CoC、离散轨迹、连续 flow action 的联合 RL 框架。<br>
+      2. 提出 token-type aware advantage routing，解决 VLA completion 中不同 token 责任混淆。<br>
+      3. 提出 counterfactual causal consistency reward，把解释质量绑定到规划行为。<br>
+      4. 将 FPO-style objective 适配到 Alpamayo 1.5 的 driving flow action expert。</p>
+    </section>
+
+    <section>
+      <h2>7. 创新性与可行性评分</h2>
+      <div class="score"><strong>Causal Flow-GRPO</strong><div class="bar"><span style="width: 92%"></span></div></div>
+      <div class="score"><strong>Counterfactual CoC Reward</strong><div class="bar"><span style="width: 86%; background: var(--blue)"></span></div></div>
+      <div class="score"><strong>Flow Expert RL/FPO</strong><div class="bar"><span style="width: 78%; background: var(--violet)"></span></div></div>
+      <div class="score"><strong>Tail-Risk GRPO</strong><div class="bar"><span style="width: 74%; background: var(--gold)"></span></div></div>
+      <div class="score"><strong>Self-Consistency Reward</strong><div class="bar"><span style="width: 66%; background: var(--red)"></span></div></div>
+      <p>评分综合考虑：论文新颖性、与 Alpamayo 1.5 结构的贴合度、当前代码实现成本、8×A100 实验可控性。</p>
+    </section>
+
+    <section>
+      <h2>8. 下一步代码计划</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>任务</th>
+            <th>文件</th>
+            <th>产出</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Reward breakdown 基础设施</td>
+            <td><code>finetune/rl/rewards/aggregated_reward.py</code></td>
+            <td>返回 <code>coc_reward</code>、<code>traj_reward</code>、<code>comfort_reward</code>、<code>consistency_reward</code>，并保持旧接口兼容。</td>
+          </tr>
+          <tr>
+            <td>CoC 解析与规则 verifier</td>
+            <td><code>finetune/rl/rewards/coc_reward.py</code></td>
+            <td>格式、实体、风险、动作意图、导航一致性打分。</td>
+          </tr>
+          <tr>
+            <td>Token mask 路由</td>
+            <td><code>finetune/rl/models/reasoning_vla/data_packer.py</code></td>
+            <td>输出 <code>coc_logprob_masks</code>、<code>traj_logprob_masks</code>、<code>format_logprob_masks</code>。</td>
+          </tr>
+          <tr>
+            <td>Per-token advantage GRPO</td>
+            <td><code>finetune/rl/models/reasoning_vla/trainer.py</code></td>
+            <td>支持标量 advantage 与矩阵 advantage 两种模式，默认兼容旧训练。</td>
+          </tr>
+          <tr>
+            <td>实验配置</td>
+            <td><code>finetune/rl/toml/*.toml</code></td>
+            <td>增加 reward weights、routing 开关、日志项。</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="callout red">
+        <strong>实现原则：</strong>
+        第一轮改动保持向后兼容：所有新功能默认关闭，旧的本地测试 TOML 不改训练行为；服务器确认 reward 分布后，再打开联合 reward 和 per-token advantage。
+      </div>
+    </section>
+
+    <section>
+      <h2>9. 参考文献与依据</h2>
+      <ul class="refs">
+        <li><a href="https://huggingface.co/nvidia/Alpamayo-1.5-10B">NVIDIA Alpamayo 1.5 model card</a>：说明 Cosmos-Reason2 backbone、diffusion trajectory decoder、CoC reasoning traces、6.4s trajectory 与训练数据构成。</li>
+        <li><a href="https://arxiv.org/abs/2511.00088">Alpamayo-R1</a>：强调 CoC dataset、diffusion trajectory decoder、RL 优化 reasoning quality 与 reasoning-action consistency，并给出 long-tail/closed-loop 改善。</li>
+        <li><a href="https://arxiv.org/abs/2510.01623">VLA-R1: Enhancing Reasoning in Vision-Language-Action Models</a>：使用 RLVR + GRPO 强化 VLA reasoning 与 execution。</li>
+        <li><a href="https://arxiv.org/abs/2507.21053">Flow Matching Policy Gradients</a>：提出 FPO，把 flow matching 带入 policy gradient，并避免精确 likelihood 计算。</li>
+        <li><a href="https://arxiv.org/abs/2510.09976">Reinforcement Fine-Tuning of Flow-Matching Policies for Vision-Language-Action Models</a>：将 FPO 用于 flow-matching VLA，强调 structure-aware credit assignment、clipped surrogate、latent exploration 和 Q-ensemble。</li>
+        <li><a href="https://arxiv.org/abs/2510.25889">π_RL: Online RL Fine-tuning for Flow-based VLA Models</a>：指出 flow matching VLA 的 action log-likelihood 难题，并提出 Flow-Noise 与 Flow-SDE。</li>
+        <li><a href="https://arxiv.org/abs/2402.03300">DeepSeekMath / GRPO</a>：GRPO 是 PPO 变体，用 group-relative baseline 降低 PPO 的 value model 成本。</li>
+        <li><a href="https://arxiv.org/abs/2303.04137">Diffusion Policy</a>：展示 diffusion-style action policies 对多模态、高维动作与稳定训练的价值。</li>
+        <li><a href="https://arxiv.org/abs/2305.16381">DPOK</a>：早期将 diffusion model fine-tuning 明确表述为带 KL 正则的 online RL 问题。</li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>
