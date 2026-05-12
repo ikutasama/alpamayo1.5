@@ -1,0 +1,991 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Alpamayo 1.5 模型结构、SFT 与 RL 训练交互讲解</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --ink: #1f2933;
+      --muted: #687586;
+      --line: #d9e0e7;
+      --blue: #2563eb;
+      --teal: #0f766e;
+      --green: #15803d;
+      --amber: #b45309;
+      --red: #b91c1c;
+      --purple: #7c3aed;
+      --code-bg: #111827;
+      --code-ink: #e5e7eb;
+      --shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+      line-height: 1.65;
+      letter-spacing: 0;
+    }
+
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+
+    aside {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow: auto;
+      border-right: 1px solid var(--line);
+      background: #fff;
+      padding: 22px 18px;
+    }
+
+    .brand {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+
+    .mark {
+      width: 42px;
+      height: 42px;
+      border: 1px solid #b7c6d8;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      color: var(--blue);
+      font-weight: 800;
+      background: #eef5ff;
+    }
+
+    .brand h1 {
+      font-size: 15px;
+      margin: 0;
+      line-height: 1.25;
+    }
+
+    .brand p {
+      margin: 2px 0 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    nav a {
+      display: block;
+      padding: 8px 10px;
+      margin: 2px 0;
+      border-radius: 6px;
+      color: #334155;
+      font-size: 14px;
+    }
+
+    nav a.active,
+    nav a:hover {
+      background: #eef5ff;
+      color: var(--blue);
+      text-decoration: none;
+    }
+
+    .main {
+      max-width: 1180px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 34px 30px 80px;
+    }
+
+    .hero {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      padding: 30px;
+      box-shadow: var(--shadow);
+    }
+
+    .hero h2 {
+      margin: 0 0 10px;
+      font-size: clamp(28px, 4vw, 46px);
+      line-height: 1.12;
+    }
+
+    .hero p {
+      max-width: 860px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 17px;
+    }
+
+    .meta-grid,
+    .cards,
+    .twocol,
+    .threecol {
+      display: grid;
+      gap: 14px;
+    }
+
+    .meta-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin-top: 22px;
+    }
+
+    .pill-card,
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 16px;
+    }
+
+    .pill-card b,
+    .card b {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .pill-card span,
+    .card span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    section {
+      margin-top: 28px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 26px;
+    }
+
+    section h2 {
+      margin: 0 0 14px;
+      font-size: 25px;
+      line-height: 1.25;
+    }
+
+    section h3 {
+      margin: 24px 0 10px;
+      font-size: 18px;
+    }
+
+    .lead {
+      color: var(--muted);
+      margin-top: 0;
+    }
+
+    .twocol { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    .threecol { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0;
+      font-size: 14px;
+    }
+
+    th, td {
+      border: 1px solid var(--line);
+      padding: 9px 10px;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f1f5f9;
+      text-align: left;
+      color: #334155;
+    }
+
+    code {
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: #eef2f7;
+      color: #0f172a;
+      font-family: Consolas, "Cascadia Mono", monospace;
+      font-size: 0.92em;
+    }
+
+    pre {
+      margin: 14px 0;
+      padding: 16px;
+      background: var(--code-bg);
+      color: var(--code-ink);
+      border-radius: 8px;
+      overflow: auto;
+      font-size: 13px;
+    }
+
+    pre code {
+      padding: 0;
+      background: transparent;
+      color: inherit;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(130px, 1fr));
+      gap: 10px;
+      align-items: stretch;
+      margin: 18px 0;
+    }
+
+    .node {
+      border: 1px solid var(--line);
+      border-left: 5px solid var(--blue);
+      border-radius: 8px;
+      background: #fff;
+      padding: 12px;
+      min-height: 98px;
+      position: relative;
+    }
+
+    .node::after {
+      content: "→";
+      position: absolute;
+      right: -14px;
+      top: 38%;
+      color: #94a3b8;
+      font-weight: 700;
+    }
+
+    .node:last-child::after { display: none; }
+    .node.teal { border-left-color: var(--teal); }
+    .node.green { border-left-color: var(--green); }
+    .node.amber { border-left-color: var(--amber); }
+    .node.purple { border-left-color: var(--purple); }
+    .node.red { border-left-color: var(--red); }
+    .node strong { display: block; font-size: 14px; margin-bottom: 5px; }
+    .node small { color: var(--muted); display: block; line-height: 1.45; }
+
+    .tabs {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-top: 14px;
+    }
+
+    .tab-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      background: #f1f5f9;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .tab-buttons button {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      padding: 11px 14px;
+      color: #334155;
+      cursor: pointer;
+      font: inherit;
+      font-size: 14px;
+    }
+
+    .tab-buttons button.active {
+      background: #fff;
+      color: var(--blue);
+      box-shadow: inset 0 -2px 0 var(--blue);
+    }
+
+    .tab-panel {
+      display: none;
+      padding: 18px;
+    }
+
+    .tab-panel.active { display: block; }
+
+    details {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin: 10px 0;
+      background: #fff;
+    }
+
+    summary {
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    .shape-badge {
+      display: inline-block;
+      border: 1px solid #bfd2ea;
+      background: #eef5ff;
+      color: #1d4ed8;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 12px;
+      margin: 2px 3px 2px 0;
+      white-space: nowrap;
+    }
+
+    .note {
+      border-left: 5px solid var(--amber);
+      background: #fff8eb;
+      padding: 12px 14px;
+      border-radius: 6px;
+      color: #55330b;
+      margin: 14px 0;
+    }
+
+    .ok {
+      border-left-color: var(--green);
+      background: #eefaf1;
+      color: #12391f;
+    }
+
+    .warn {
+      border-left-color: var(--red);
+      background: #fff1f2;
+      color: #5f1318;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 10px 0;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--blue);
+      display: inline-block;
+    }
+    .dot.teal { background: var(--teal); }
+    .dot.green { background: var(--green); }
+    .dot.amber { background: var(--amber); }
+    .dot.purple { background: var(--purple); }
+    .dot.red { background: var(--red); }
+
+    .svg-wrap {
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 12px;
+      margin: 14px 0;
+    }
+
+    svg text {
+      font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+      fill: #1f2933;
+    }
+
+    .checklist li { margin: 7px 0; }
+
+    .footer {
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; }
+      aside {
+        position: relative;
+        height: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      nav {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .meta-grid,
+      .twocol,
+      .threecol,
+      .flow {
+        grid-template-columns: 1fr;
+      }
+      .node::after { display: none; }
+      .main { padding: 20px 14px 50px; }
+      section, .hero { padding: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside>
+      <div class="brand">
+        <div class="mark">A1.5</div>
+        <div>
+          <h1>Alpamayo 1.5<br />交互讲解</h1>
+          <p>模型结构 · SFT · RL · 张量维度</p>
+        </div>
+      </div>
+      <nav id="toc">
+        <a href="#overview">1. 总览</a>
+        <a href="#symbols">2. 维度符号</a>
+        <a href="#model">3. 模型结构</a>
+        <a href="#inference">4. 推理数据流</a>
+        <a href="#expert">5. Action Expert</a>
+        <a href="#sft">6. SFT 训练</a>
+        <a href="#rl">7. RL 训练</a>
+        <a href="#reward">8. Reward</a>
+        <a href="#compare">9. SFT/RL 对比</a>
+        <a href="#files">10. 代码地图</a>
+        <a href="#research">11. 改进切入点</a>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <div class="hero" id="overview">
+        <h2>Alpamayo 1.5 从输入到训练的完整地图</h2>
+        <p>
+          这份 HTML 是给科研新人看的“可视化代码导读”：它把 Alpamayo 1.5 的模型结构、推理链路、
+          SFT stage1/stage2 和 Cosmos-RL/GRPO 训练拆成可追踪的数据流。重点不是背公式，而是知道
+          一个 tensor 从哪个文件的哪个函数来，变成什么形状，又被谁消费。
+        </p>
+        <div class="meta-grid">
+          <div class="pill-card"><b>主模型</b><span>Qwen3-VL/Cosmos-Reason 风格 VLM + action expert</span></div>
+          <div class="pill-card"><b>未来轨迹</b><span>64 waypoints，10Hz，约 6.4 秒</span></div>
+          <div class="pill-card"><b>Action space</b><span><code>[64, 2]</code>，acceleration + curvature</span></div>
+          <div class="pill-card"><b>RL 算法</b><span>Cosmos-RL 中的 GRPO rollout-policy 架构</span></div>
+        </div>
+      </div>
+
+      <section id="symbols">
+        <h2>2. 先认识维度符号</h2>
+        <p class="lead">读这个项目时，最容易迷路的是 shape。下面这张表是后文所有图表的“字典”。</p>
+        <table>
+          <thead><tr><th>符号</th><th>含义</th><th>常见值</th><th>代码来源</th></tr></thead>
+          <tbody>
+            <tr><td><code>B</code></td><td>batch size</td><td>推理常为 1，训练按配置</td><td>dataloader/collate</td></tr>
+            <tr><td><code>G</code></td><td>trajectory group 数</td><td>推理要求 1</td><td><code>ego_history_xyz.shape[1]</code></td></tr>
+            <tr><td><code>T_h</code></td><td>历史轨迹点数</td><td>16</td><td><code>num_history_steps</code></td></tr>
+            <tr><td><code>T_f</code></td><td>未来轨迹点数</td><td>64</td><td><code>num_future_steps</code> / <code>n_waypoints</code></td></tr>
+            <tr><td><code>L</code></td><td>token 序列长度</td><td>运行时变量</td><td>图像 patch + 文本 + 特殊 token</td></tr>
+            <tr><td><code>V</code></td><td>扩展后 tokenizer 词表</td><td>checkpoint 决定</td><td><code>ReasoningVLAConfig._build_processor()</code></td></tr>
+            <tr><td><code>D</code></td><td>hidden size</td><td>checkpoint 决定</td><td><code>self.vlm.config.text_config.hidden_size</code></td></tr>
+            <tr><td><code>B*</code></td><td>采样扩展 batch</td><td><code>B * num_traj_samples * num_traj_sets</code></td><td>推理 rollout</td></tr>
+          </tbody>
+        </table>
+        <div class="note ok">
+          一个实用读法：所有 <code>[B,L,V]</code> 都是语言模型 logits；所有 <code>[B,64,2]</code> 都是 action space；
+          所有 <code>[B,64,3]</code> 都是未来轨迹坐标。
+        </div>
+      </section>
+
+      <section id="model">
+        <h2>3. 模型结构：VLM 负责理解，Expert 负责动作</h2>
+        <p class="lead">
+          Alpamayo 1.5 可以看成两部分：一个会看图和生成推理的 VLM，一个把推理上下文变成连续驾驶动作的 action expert。
+        </p>
+
+        <div class="svg-wrap" aria-label="模型结构图">
+          <svg width="1040" height="430" viewBox="0 0 1040 430" role="img">
+            <defs>
+              <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"></path>
+              </marker>
+            </defs>
+            <rect x="20" y="20" width="1000" height="390" rx="8" fill="#f8fafc" stroke="#d9e0e7"/>
+            <text x="46" y="55" font-size="22" font-weight="700">Alpamayo 1.5 推理结构</text>
+
+            <rect x="55" y="95" width="210" height="90" rx="8" fill="#eef5ff" stroke="#93c5fd"/>
+            <text x="80" y="126" font-size="16" font-weight="700">多相机图像</text>
+            <text x="80" y="153" font-size="13">pixel_values</text>
+            <text x="80" y="173" font-size="13">image_grid_thw</text>
+
+            <rect x="55" y="215" width="210" height="90" rx="8" fill="#f0fdfa" stroke="#5eead4"/>
+            <text x="80" y="246" font-size="16" font-weight="700">历史轨迹</text>
+            <text x="80" y="273" font-size="13">ego_history_xyz/rot</text>
+            <text x="80" y="293" font-size="13">fuse_traj_tokens</text>
+
+            <rect x="330" y="120" width="230" height="155" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+            <text x="360" y="155" font-size="18" font-weight="700">VLM Backbone</text>
+            <text x="360" y="183" font-size="13">Qwen3-VL/Cosmos-Reason</text>
+            <text x="360" y="207" font-size="13">generate CoC reasoning</text>
+            <text x="360" y="231" font-size="13">stop at &lt;|traj_future_start|&gt;</text>
+            <text x="360" y="255" font-size="13">output KV cache</text>
+
+            <rect x="625" y="95" width="210" height="90" rx="8" fill="#fff7ed" stroke="#f59e0b"/>
+            <text x="650" y="126" font-size="16" font-weight="700">Action Expert</text>
+            <text x="650" y="153" font-size="13">inputs_embeds [B*,64,D]</text>
+            <text x="650" y="173" font-size="13">conditioned on VLM cache</text>
+
+            <rect x="625" y="215" width="210" height="90" rx="8" fill="#f5f3ff" stroke="#a78bfa"/>
+            <text x="650" y="246" font-size="16" font-weight="700">Flow Matching</text>
+            <text x="650" y="273" font-size="13">sample action [B*,64,2]</text>
+            <text x="650" y="293" font-size="13">Euler integration</text>
+
+            <rect x="875" y="150" width="115" height="100" rx="8" fill="#f0fdf4" stroke="#86efac"/>
+            <text x="895" y="183" font-size="16" font-weight="700">轨迹</text>
+            <text x="895" y="211" font-size="13">xyz [B,N,K,64,3]</text>
+            <text x="895" y="231" font-size="13">rot [B,N,K,64,3,3]</text>
+
+            <line x1="265" y1="140" x2="330" y2="170" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+            <line x1="265" y1="260" x2="330" y2="225" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+            <line x1="560" y1="195" x2="625" y2="140" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+            <line x1="730" y1="185" x2="730" y2="215" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+            <line x1="835" y1="260" x2="875" y2="205" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+
+            <text x="333" y="330" font-size="13" fill="#64748b">关键文件：src/alpamayo1_5/models/alpamayo1_5.py</text>
+            <text x="333" y="354" font-size="13" fill="#64748b">关键函数：sample_trajectories_from_data_with_vlm_rollout()</text>
+          </svg>
+        </div>
+
+        <div class="threecol">
+          <div class="card">
+            <b>VLM Backbone</b>
+            <span>读图像、历史轨迹 token、prompt，自回归生成 CoC 推理，并提供 KV cache。</span>
+            <p><code>src/alpamayo1_5/models/base_model.py</code></p>
+          </div>
+          <div class="card">
+            <b>Action Expert</b>
+            <span>复用 VLM text config，但删除 embed_tokens，直接吃 action embedding。</span>
+            <p><code>src/alpamayo1_5/models/alpamayo1_5.py</code></p>
+          </div>
+          <div class="card">
+            <b>Action Space</b>
+            <span>把未来轨迹转换为 acceleration/curvature，也把采样 action 积分回轨迹。</span>
+            <p><code>src/alpamayo1_5/action_space/unicycle_accel_curvature.py</code></p>
+          </div>
+        </div>
+      </section>
+
+      <section id="inference">
+        <h2>4. 推理数据流：从 PAI 样本到未来轨迹</h2>
+        <div class="flow">
+          <div class="node"><strong>PAI sample</strong><small>图像、历史轨迹、未来 GT</small><small><code>[G,16,3]</code></small></div>
+          <div class="node teal"><strong>QwenProcessor</strong><small>构造 chat template 和图像输入</small><small><code>input_ids [B,L]</code></small></div>
+          <div class="node green"><strong>fuse_traj_tokens</strong><small>历史轨迹占位符替换为真实 token</small></div>
+          <div class="node amber"><strong>VLM generate</strong><small>生成 CoC 到 future_start</small><small><code>sequences [B*,L+Lgen]</code></small></div>
+          <div class="node purple"><strong>Expert + Flow</strong><small>采样 action</small><small><code>[B*,64,2]</code></small></div>
+          <div class="node red"><strong>action_to_traj</strong><small>输出未来轨迹</small><small><code>[B,N,K,64,3]</code></small></div>
+        </div>
+
+        <h3>关键 shape 表</h3>
+        <table>
+          <thead><tr><th>阶段</th><th>代码位置</th><th>输入</th><th>输出</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>图文预处理</td>
+              <td><code>QwenProcessor._preprocess_data()</code></td>
+              <td><span class="shape-badge">images [C,F,3,H,W]</span></td>
+              <td><span class="shape-badge">text</span><span class="shape-badge">pixel_values</span><span class="shape-badge">image_grid_thw [N_img,3]</span></td>
+            </tr>
+            <tr>
+              <td>batch collate</td>
+              <td><code>QwenProcessor.collate_fn()</code></td>
+              <td>list of samples</td>
+              <td><span class="shape-badge">input_ids [B,L]</span><span class="shape-badge">attention_mask [B,L]</span></td>
+            </tr>
+            <tr>
+              <td>历史轨迹注入</td>
+              <td><code>TrajectoryFusionMixin.fuse_traj_tokens()</code></td>
+              <td><span class="shape-badge">ego_history_xyz [B,G,16,3]</span></td>
+              <td><span class="shape-badge">input_ids [B,L]</span> 内容被替换</td>
+            </tr>
+            <tr>
+              <td>VLM 生成</td>
+              <td><code>self.vlm.generate()</code></td>
+              <td><span class="shape-badge">input_ids [B,L]</span></td>
+              <td><span class="shape-badge">sequences [B*,L+L_gen]</span><span class="shape-badge">KV cache</span></td>
+            </tr>
+            <tr>
+              <td>Expert 位置编码</td>
+              <td><code>_build_expert_pos_ids_and_attn_mask()</code></td>
+              <td><span class="shape-badge">offset [B*]</span></td>
+              <td><span class="shape-badge">position_ids [3,B*,64]</span><span class="shape-badge">mask [B*,1,64,KV+64]</span></td>
+            </tr>
+            <tr>
+              <td>Diffusion 采样</td>
+              <td><code>FlowMatching.sample()</code></td>
+              <td><span class="shape-badge">noise [B*,64,2]</span></td>
+              <td><span class="shape-badge">sampled_action [B*,64,2]</span></td>
+            </tr>
+            <tr>
+              <td>轨迹解码</td>
+              <td><code>action_to_traj()</code></td>
+              <td><span class="shape-badge">action [B*,64,2]</span></td>
+              <td><span class="shape-badge">pred_xyz [B,N_set,N_s,64,3]</span></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <details open>
+          <summary>为什么 VLM 不直接生成轨迹 token？</summary>
+          <p>
+            Alpamayo 1.5 的主推理路径把“语言推理”和“连续动作生成”拆开：VLM 生成 CoC 并产生上下文 cache，
+            action expert 在连续 action space 里通过 flow matching 采样。这样轨迹更容易满足连续性、平滑性和车辆动力学约束。
+          </p>
+        </details>
+      </section>
+
+      <section id="expert">
+        <h2>5. Action Expert：从噪声 action 到轨迹</h2>
+        <p class="lead">这里是 Alpamayo 1.5 区别于纯语言生成轨迹的重点。</p>
+
+        <div class="tabs" data-tabs>
+          <div class="tab-buttons">
+            <button class="active" data-tab="action">Action Space</button>
+            <button data-tab="flow">Flow Matching</button>
+            <button data-tab="expert">Expert Transformer</button>
+            <button data-tab="decode">Unicycle Decode</button>
+          </div>
+          <div class="tab-panel active" data-panel="action">
+            <p>action space 来自 <code>UnicycleAccelCurvatureActionSpace.get_action_space_dims()</code>，返回 <code>(64, 2)</code>。</p>
+            <table>
+              <thead><tr><th>维度</th><th>含义</th></tr></thead>
+              <tbody>
+                <tr><td><code>64</code></td><td>未来 64 个 waypoint，每 0.1 秒一个点</td></tr>
+                <tr><td><code>2</code></td><td>第 0 维 acceleration，第 1 维 curvature，均为归一化值</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="tab-panel" data-panel="flow">
+            <p><code>FlowMatching.sample()</code> 从 <code>torch.randn(B*,64,2)</code> 开始，沿着 expert 预测的 vector field 积分到真实 action 分布。</p>
+            <pre><code>x = torch.randn(batch_size, 64, 2)
+for t in linspace(0, 1):
+    v = step_fn(x, t)
+    x = x + dt * v</code></pre>
+          </div>
+          <div class="tab-panel" data-panel="expert">
+            <p><code>step_fn()</code> 把 noisy action 投影成 token embedding，再让 expert transformer 结合 VLM cache 预测 vector field。</p>
+            <table>
+              <thead><tr><th>变量</th><th>形状</th></tr></thead>
+              <tbody>
+                <tr><td><code>x</code></td><td><code>[B*,64,2]</code></td></tr>
+                <tr><td><code>future_token_embeds</code></td><td><code>[B*,64,D]</code></td></tr>
+                <tr><td><code>expert last_hidden_state</code></td><td><code>[B*,64,D]</code></td></tr>
+                <tr><td><code>pred</code></td><td><code>[B*,64,2]</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="tab-panel" data-panel="decode">
+            <p><code>action_to_traj()</code> 反归一化 acceleration/curvature，然后用 unicycle kinematics 积分出 <code>x,y,yaw</code>。</p>
+            <p>输出是 <code>pred_xyz [B*,64,3]</code> 和 <code>pred_rot [B*,64,3,3]</code>，最后 reshape 为采样轨迹集合。</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="sft">
+        <h2>6. SFT 训练：stage1 和 stage2 不一样</h2>
+        <p class="lead">
+          SFT 入口是 <code>finetune/sft/train_hf.py</code>。stage1 训练 VLM 离散轨迹 token 生成；
+          stage2 训练 Alpamayo 1.5 action expert 的 flow matching head。
+        </p>
+
+        <div class="tabs" data-tabs>
+          <div class="tab-buttons">
+            <button class="active" data-tab="stage1">Stage1：离散 token</button>
+            <button data-tab="stage2">Stage2：Action Expert</button>
+            <button data-tab="eval">SFT Eval</button>
+          </div>
+          <div class="tab-panel active" data-panel="stage1">
+            <h3>训练目标</h3>
+            <p>让 VLM 学会 next-token prediction，尤其是生成 future trajectory 离散 token。</p>
+            <pre><code># finetune/sft/models/sft_base_model.py
+outputs = self.vlm(input_ids=input_ids, labels=labels, **tokenized_data)
+future_traj_loss = CE(outputs.logits, labels, traj_mask)
+others_loss = CE(outputs.logits, labels, labels != IGNORE_INDEX)
+loss = future_traj_loss + others_loss</code></pre>
+            <table>
+              <thead><tr><th>变量</th><th>形状</th><th>说明</th></tr></thead>
+              <tbody>
+                <tr><td><code>input_ids</code></td><td><code>[B,L]</code></td><td>历史和未来轨迹占位符已被真实离散 token 替换</td></tr>
+                <tr><td><code>labels_mask</code></td><td><code>[B,L]</code></td><td>通常只让 <code>traj_future</code> 参与 loss</td></tr>
+                <tr><td><code>logits</code></td><td><code>[B,L,V]</code></td><td>语言模型每个位置预测下一个 token</td></tr>
+                <tr><td><code>loss</code></td><td>scalar</td><td>future trajectory token CE + other token CE</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="tab-panel" data-panel="stage2">
+            <h3>训练目标</h3>
+            <p>让 continuous action expert 学会从 noisy action 预测 flow matching vector field。</p>
+            <pre><code># finetune/sft/models/sft_alpamayo1_5.py
+action = action_space.traj_to_action(ego_history, ego_future)  # [B,64,2]
+training_data = diffusion.construct_training_data(action)
+action_embeds = action_in_proj(noisy_x, timesteps)             # [B,64,D]
+expert_outputs = expert(inputs_embeds=action_embeds, past_key_values=vlm_cache)
+pred = action_out_proj(expert_outputs.last_hidden_state)       # [B,64,2]
+loss = MSE(pred, x - noise)</code></pre>
+            <table>
+              <thead><tr><th>变量</th><th>形状</th><th>说明</th></tr></thead>
+              <tbody>
+                <tr><td><code>ego_future_xyz</code></td><td><code>[B,G,64,3]</code></td><td>GT 未来轨迹</td></tr>
+                <tr><td><code>action</code></td><td><code>[B,64,2]</code></td><td>acceleration + curvature</td></tr>
+                <tr><td><code>noisy_x</code></td><td><code>[B,64,2]</code></td><td>flow matching 训练输入</td></tr>
+                <tr><td><code>action_embeds</code></td><td><code>[B,64,D]</code></td><td>expert 输入 embedding</td></tr>
+                <tr><td><code>pred</code></td><td><code>[B,64,2]</code></td><td>预测 vector field</td></tr>
+              </tbody>
+            </table>
+            <div class="note warn">
+              stage2 当前实现隐含假设 <code>G=1</code>。如果多个 trajectory group 被展平成 <code>B*G</code>，VLM cache 的 batch 维可能和 action batch 不一致。
+            </div>
+          </div>
+
+          <div class="tab-panel" data-panel="eval">
+            <p><code>finetune/sft/evaluate_hf.py</code> 用 <code>ReasoningSampler</code> 采样轨迹，再用 <code>DistanceMetrics</code> 计算 ADE/minADE/corner distance。</p>
+            <table>
+              <thead><tr><th>输出</th><th>形状</th></tr></thead>
+              <tbody>
+                <tr><td><code>pred_xyz</code></td><td><code>[B,N_set,N_s,64,3]</code></td></tr>
+                <tr><td><code>pred_rot</code></td><td><code>[B,N_set,N_s,64,3,3]</code></td></tr>
+                <tr><td><code>ego_future_xyz[:, -1]</code></td><td><code>[B,64,3]</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="rl">
+        <h2>7. RL 训练：Cosmos-RL + GRPO</h2>
+        <p class="lead">
+          RL 入口是 <code>finetune/rl/models/reasoning_vla/alpamayo_cosmos_rl_post_training_entry.py</code>。
+          当前 RL 路径训练的是 VLM 离散生成路径，不直接训练 Alpamayo 1.5 continuous action expert。
+        </p>
+
+        <div class="svg-wrap">
+          <svg width="1040" height="360" viewBox="0 0 1040 360" role="img">
+            <defs>
+              <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"></path>
+              </marker>
+            </defs>
+            <rect x="30" y="35" width="190" height="85" rx="8" fill="#eef5ff" stroke="#93c5fd"/>
+            <text x="55" y="70" font-size="16" font-weight="700">Dataset Stub</text>
+            <text x="55" y="96" font-size="13">{"idx","split"}</text>
+
+            <rect x="280" y="35" width="210" height="85" rx="8" fill="#f0fdfa" stroke="#5eead4"/>
+            <text x="305" y="70" font-size="16" font-weight="700">Rollout Packer</text>
+            <text x="305" y="96" font-size="13">TokensPrompt + images</text>
+
+            <rect x="550" y="35" width="190" height="85" rx="8" fill="#fff7ed" stroke="#f59e0b"/>
+            <text x="575" y="70" font-size="16" font-weight="700">vLLM Rollout</text>
+            <text x="575" y="96" font-size="13">n_generation completions</text>
+
+            <rect x="805" y="35" width="190" height="85" rx="8" fill="#fff1f2" stroke="#fb7185"/>
+            <text x="830" y="70" font-size="16" font-weight="700">Reward</text>
+            <text x="830" y="96" font-size="13">ADE + Comfort</text>
+
+            <rect x="805" y="205" width="190" height="85" rx="8" fill="#f5f3ff" stroke="#a78bfa"/>
+            <text x="830" y="240" font-size="16" font-weight="700">GRPO Trainer</text>
+            <text x="830" y="266" font-size="13">logprob + advantage</text>
+
+            <rect x="550" y="205" width="190" height="85" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+            <text x="575" y="240" font-size="16" font-weight="700">Policy Packer</text>
+            <text x="575" y="266" font-size="13">prompt + completion</text>
+
+            <rect x="280" y="205" width="210" height="85" rx="8" fill="#ecfdf5" stroke="#86efac"/>
+            <text x="305" y="240" font-size="16" font-weight="700">Policy Model</text>
+            <text x="305" y="266" font-size="13">logits [B,L,V]</text>
+
+            <line x1="220" y1="78" x2="280" y2="78" stroke="#64748b" stroke-width="2" marker-end="url(#arrow2)"/>
+            <line x1="490" y1="78" x2="550" y2="78" stroke="#64748b" stroke-width="2" marker-end="url(#arrow2)"/>
+            <line x1="740" y1="78" x2="805" y2="78" stroke="#64748b" stroke-width="2" marker-end="url(#arrow2)"/>
+            <line x1="900" y1="120" x2="900" y2="205" stroke="#64748b" stroke-width="2" marker-end="url(#arrow2)"/>
+            <line x1="805" y1="247" x2="740" y2="247" stroke="#64748b" stroke-width="2" marker-end="url(#arrow2)"/>
+            <line x1="550" y1="247" x2="490" y2="247" stroke="#64748b" stroke-width="2" marker-end="url(#arrow2)"/>
+            <line x1="385" y1="205" x2="385" y2="120" stroke="#64748b" stroke-width="2" marker-end="url(#arrow2)"/>
+            <text x="64" y="330" font-size="13" fill="#64748b">核心循环：rollout 生成 completion → reward 产生 advantage → policy 用 GRPO 更新 → 权重同步给 rollout</text>
+          </svg>
+        </div>
+
+        <div class="tabs" data-tabs>
+          <div class="tab-buttons">
+            <button class="active" data-tab="rollout">Rollout 侧</button>
+            <button data-tab="policy">Policy 侧</button>
+            <button data-tab="grpo">GRPO Loss</button>
+          </div>
+          <div class="tab-panel active" data-panel="rollout">
+            <table>
+              <thead><tr><th>函数</th><th>输入</th><th>输出</th></tr></thead>
+              <tbody>
+                <tr><td><code>AlpamayoCosmosDataset.__getitem__</code></td><td>idx</td><td><code>{"idx","split"}</code></td></tr>
+                <tr><td><code>RVLADataPacker.get_rollout_input</code></td><td>idx stub</td><td><code>TokensPrompt</code></td></tr>
+                <tr><td><code>ReasoningVlaVllmRollout.rollout_generation</code></td><td>list of prompts</td><td>list of completion strings</td></tr>
+              </tbody>
+            </table>
+            <p>配置里 <code>rollout.batch_size=2</code>，<code>rollout.n_generation=12</code>，所以一次 rollout batch 理想情况下产生 24 条 completion。</p>
+          </div>
+          <div class="tab-panel" data-panel="policy">
+            <table>
+              <thead><tr><th>字段</th><th>形状</th><th>说明</th></tr></thead>
+              <tbody>
+                <tr><td><code>tokenized_data.input_ids</code></td><td><code>[B_rl,L_rl]</code></td><td>prompt + completion + end token</td></tr>
+                <tr><td><code>labels_mask</code></td><td><code>[B_rl,L_rl]</code></td><td>只标记 completion 区域</td></tr>
+                <tr><td><code>logprob_masks</code></td><td><code>[B_rl,L_rl]</code></td><td>GRPO 只在这些 token 上取 logprob</td></tr>
+                <tr><td><code>logits</code></td><td><code>[B_rl,L_rl,V]</code></td><td>policy 模型输出</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="tab-panel" data-panel="grpo">
+            <pre><code>ratio = exp(logp_current - logp_old)
+loss = -min(ratio * advantage, clipped_ratio * advantage)
+loss += kl_beta * KL(current || reference)</code></pre>
+            <p>直觉：同一个 prompt 的多条 completion 会被 reward 比较。reward 高的 completion 有正 advantage，模型会提高它的 token 概率；reward 低的 completion 有负 advantage，模型会降低它的 token 概率。</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="reward">
+        <h2>8. Reward：轨迹准确 + 驾驶舒适</h2>
+        <p class="lead">当前默认 reward 是 demo 版本，但已经能跑通完整 RL 闭环。</p>
+
+        <div class="twocol">
+          <div class="card">
+            <b>ADE 轨迹误差</b>
+            <p><code>finetune/rl/rewards/traj_reward.py::calculate_ade()</code></p>
+            <p>只看 XY 平面，逐 waypoint 计算预测轨迹和 GT 轨迹的欧式距离，再取平均。</p>
+          </div>
+          <div class="card">
+            <b>Comfort 舒适性</b>
+            <p><code>finetune/rl/rewards/comfort_reward.py::compute_comfort()</code></p>
+            <p>检查纵向/横向加速度、jerk、yaw rate、yaw acceleration 是否落在舒适阈值内。</p>
+          </div>
+        </div>
+
+        <pre><code># finetune/rl/rewards/aggregated_reward.py
+if l2_dist &lt; 3.0:
+    reward = -traj_l2_weight * (l2_dist / 3.0) + comfort_weight * comfort_score
+else:
+    reward = -1.0</code></pre>
+
+        <details>
+          <summary>completion 如何变成轨迹？</summary>
+          <p>
+            <code>decode_rollout_trajectory()</code> 会从 completion 字符串中切出
+            <code>&lt;|traj_future_start|&gt;</code> 到 <code>&lt;|traj_future_end|&gt;</code> 之间的离散轨迹 token，
+            再调用 <code>traj_tokenizer.decode()</code> 得到 <code>predicted_fut_xyz [G,64,3]</code>。
+          </p>
+        </details>
+      </section>
+
+      <section id="compare">
+        <h2>9. SFT/RL 对比：一张表抓住差异</h2>
+        <table>
+          <thead><tr><th>维度</th><th>SFT Stage1</th><th>SFT Stage2</th><th>RL</th></tr></thead>
+          <tbody>
+            <tr><td>训练对象</td><td>VLM 离散 token 生成</td><td>Action expert diffusion head</td><td>VLM 离散生成路径</td></tr>
+            <tr><td>核心输入</td><td>GT future token</td><td>GT future continuous trajectory</td><td>model sampled completion</td></tr>
+            <tr><td>模型输出</td><td><code>logits [B,L,V]</code></td><td><code>pred [B,64,2]</code></td><td><code>logits [B,L,V]</code></td></tr>
+            <tr><td>loss</td><td>Cross entropy</td><td>Flow matching MSE</td><td>GRPO policy loss</td></tr>
+            <tr><td>是否在线采样</td><td>否</td><td>否</td><td>是</td></tr>
+            <tr><td>是否需要 reward</td><td>否</td><td>否</td><td>是</td></tr>
+            <tr><td>当前仓库默认能力</td><td>可训练</td><td>可训练</td><td>可训练 VLM 离散路径</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="files">
+        <h2>10. 代码地图</h2>
+        <div class="threecol">
+          <div class="card">
+            <b>推理</b>
+            <ul>
+              <li><code>src/alpamayo1_5/models/alpamayo1_5.py</code></li>
+              <li><code>src/alpamayo1_5/models/base_model.py</code></li>
+              <li><code>src/alpamayo1_5/diffusion/flow_matching.py</code></li>
+              <li><code>src/alpamayo1_5/action_space/unicycle_accel_curvature.py</code></li>
+            </ul>
+          </div>
+          <div class="card">
+            <b>SFT</b>
+            <ul>
+              <li><code>finetune/sft/train_hf.py</code></li>
+              <li><code>finetune/sft/trainer.py</code></li>
+              <li><code>finetune/sft/models/sft_base_model.py</code></li>
+              <li><code>finetune/sft/models/sft_alpamayo1_5.py</code></li>
+            </ul>
+          </div>
+          <div class="card">
+            <b>RL</b>
+            <ul>
+              <li><code>finetune/rl/models/reasoning_vla/rollout.py</code></li>
+              <li><code>finetune/rl/models/reasoning_vla/trainer.py</code></li>
+              <li><code>finetune/rl/models/reasoning_vla/data_packer.py</code></li>
+              <li><code>finetune/rl/rewards/aggregated_reward.py</code></li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section id="research">
+        <h2>11. 后续科研改进切入点</h2>
+        <ul class="checklist">
+          <li><b>Reward 加强：</b>在 ADE + comfort 外加入道路边界、碰撞风险、车道保持、终点误差、TTC 等指标。</li>
+          <li><b>Reasoning reward：</b>解析 <code>&lt;|cot_start|&gt;...&lt;|cot_end|&gt;</code>，奖励推理是否解释了关键交通参与者和驾驶意图。</li>
+          <li><b>GRPO 稳定性：</b>系统调 <code>kl_beta</code>、reference reset、positive NLL、completion 过滤和 reward normalization。</li>
+          <li><b>Hard case mining：</b>让训练更关注高 ADE、低舒适性或推理-轨迹不一致的场景。</li>
+          <li><b>Action expert RL：</b>这是更深入的课题，需要把 continuous action expert 的可微/可采样策略和 logprob 设计接进 RL，而不是只训练离散 VLM 路径。</li>
+        </ul>
+        <div class="note">
+          工程上建议先改 reward 和 logging，因为它们最容易形成可靠实验闭环；等 reward 曲线、ADE、completion 解析都稳定后，再动模型结构和 RL loss。
+        </div>
+      </section>
+
+      <section>
+        <h2>参考资源</h2>
+        <ul>
+          <li><a href="https://github.com/ikutasama/alpamayo1.5">你的 alpamayo1.5 仓库</a></li>
+          <li><a href="https://github.com/NVlabs/alpamayo1.5">官方 Alpamayo 1.5 release</a></li>
+          <li><a href="https://github.com/NVlabs/alpamayo/tree/main/finetune">官方 Alpamayo finetune</a></li>
+          <li><a href="https://huggingface.co/nvidia/Alpamayo-1.5-10B">Alpamayo-1.5-10B 模型卡</a></li>
+        </ul>
+      </section>
+
+      <p class="footer">
+        本文件是独立 HTML，无需联网依赖。建议用浏览器打开；Markdown 底稿位于同目录下的
+        <code>alpamayo1_5_model_structure_and_inference.md</code> 和
+        <code>alpamayo1_5_training_sft_rl_io.md</code>。
+      </p>
+    </main>
+  </div>
+
+  <script>
+    const tabRoots = document.querySelectorAll("[data-tabs]");
+    for (const root of tabRoots) {
+      const buttons = root.querySelectorAll("[data-tab]");
+      const panels = root.querySelectorAll("[data-panel]");
+      for (const button of buttons) {
+        button.addEventListener("click", () => {
+          const target = button.getAttribute("data-tab");
+          buttons.forEach((b) => b.classList.toggle("active", b === button));
+          panels.forEach((p) => p.classList.toggle("active", p.getAttribute("data-panel") === target));
+        });
+      }
+    }
+
+    const navLinks = Array.from(document.querySelectorAll("#toc a"));
+    const sections = navLinks
+      .map((a) => document.querySelector(a.getAttribute("href")))
+      .filter(Boolean);
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+      if (!visible) return;
+      const id = "#" + visible.target.id;
+      navLinks.forEach((a) => a.classList.toggle("active", a.getAttribute("href") === id));
+    }, { rootMargin: "-15% 0px -70% 0px", threshold: [0.1, 0.25, 0.5] });
+    sections.forEach((section) => observer.observe(section));
+  </script>
+</body>
+</html>
