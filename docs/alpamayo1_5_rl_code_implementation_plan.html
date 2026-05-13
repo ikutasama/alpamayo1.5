@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alpamayo 1.5 RL 代码改进实施蓝图</title>
+  <style>
+    :root {
+      --ink: #192333;
+      --muted: #5d6878;
+      --paper: #f5f7fa;
+      --panel: #ffffff;
+      --line: #d8e0ea;
+      --blue: #255f99;
+      --green: #2f7158;
+      --gold: #86641f;
+      --red: #9a3944;
+      --code: #f0f3f7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+      line-height: 1.62;
+    }
+    header {
+      background: #10263d;
+      color: #fff;
+      padding: 44px 28px 34px;
+      border-bottom: 5px solid #77bd9c;
+    }
+    header .wrap, main {
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: clamp(30px, 4vw, 52px);
+      line-height: 1.1;
+      letter-spacing: 0;
+    }
+    .subtitle {
+      max-width: 980px;
+      margin: 0;
+      color: #dce8f2;
+      font-size: 18px;
+    }
+    main { padding: 28px; }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 24px;
+      margin: 0 0 22px;
+      box-shadow: 0 8px 24px rgba(31, 44, 60, 0.04);
+    }
+    h2 {
+      margin: 0 0 14px;
+      font-size: 25px;
+      letter-spacing: 0;
+    }
+    h3 {
+      margin: 20px 0 8px;
+      font-size: 19px;
+      letter-spacing: 0;
+    }
+    p { margin: 8px 0 12px; }
+    code {
+      background: var(--code);
+      border: 1px solid #dde4ec;
+      border-radius: 5px;
+      padding: 1px 5px;
+      font-family: "Cascadia Mono", Consolas, monospace;
+      font-size: 0.92em;
+    }
+    pre {
+      overflow-x: auto;
+      background: #111827;
+      color: #e5edf7;
+      border-radius: 8px;
+      padding: 14px 16px;
+      font-family: "Cascadia Mono", Consolas, monospace;
+      font-size: 14px;
+      line-height: 1.48;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      vertical-align: top;
+      text-align: left;
+    }
+    th { background: #edf2f7; }
+    .grid { display: grid; gap: 14px; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .tile {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+      padding: 16px;
+    }
+    .tile strong { display: block; margin-bottom: 6px; }
+    .tag {
+      display: inline-block;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 9px;
+      margin: 2px 4px 2px 0;
+      font-size: 12px;
+      color: var(--muted);
+      background: #fff;
+    }
+    .callout {
+      border-left: 5px solid var(--blue);
+      background: #edf5fc;
+      padding: 12px 14px;
+      border-radius: 6px;
+      margin: 12px 0;
+    }
+    .callout.green { border-left-color: var(--green); background: #eef8f4; }
+    .callout.gold { border-left-color: var(--gold); background: #fbf6e8; }
+    .callout.red { border-left-color: var(--red); background: #fbf0f1; }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(130px, 1fr));
+      gap: 10px;
+      margin: 14px 0;
+    }
+    .step {
+      position: relative;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+      padding: 14px;
+      min-height: 112px;
+    }
+    .step:not(:last-child)::after {
+      content: ">";
+      position: absolute;
+      right: -10px;
+      top: 39px;
+      color: var(--muted);
+      font-weight: 700;
+      background: var(--paper);
+    }
+    @media (max-width: 880px) {
+      .grid.two, .grid.three, .flow { grid-template-columns: 1fr; }
+      .step:not(:last-child)::after { display: none; }
+      main { padding: 16px; }
+      section { padding: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>Alpamayo 1.5 RL 代码改进实施蓝图</h1>
+      <p class="subtitle">把 Causal Flow-GRPO 从论文想法压到代码层：reward 分解、CoC 解析、token mask 路由、per-token advantage、flow expert RL，以及每一步如何保持旧训练配置可跑。</p>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <h2>0. 总原则</h2>
+      <div class="callout green">
+        第一轮代码改造采用“默认关闭、逐项打开”的策略。也就是说，合入代码后不改 TOML 开关时，现有 <code>ADE + comfort + GRPO</code> 行为应保持一致；服务器只需要打开新配置项，才进入 CoC reward、advantage routing 或 flow expert RL。
+      </div>
+      <div class="grid three">
+        <div class="tile">
+          <strong>先做 reward 和日志</strong>
+          <span class="tag">低风险</span><span class="tag">可快速验证</span>
+          <p>先让每条 rollout 有结构化 reward breakdown，观察分布，再让 trainer 消费它。</p>
+        </div>
+        <div class="tile">
+          <strong>再做 token 级信用分配</strong>
+          <span class="tag">核心创新</span><span class="tag">GRPO 兼容</span>
+          <p>CoC token、轨迹 token、格式 token 不再共用同一个 advantage。</p>
+        </div>
+        <div class="tile">
+          <strong>最后接 flow expert RL</strong>
+          <span class="tag">高收益</span><span class="tag">高调参成本</span>
+          <p>先冻结 VLM，只训练 action expert 的 LoRA/adapter 或小学习率全参。</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>1. 当前代码路径与插入点</h2>
+      <div class="flow">
+        <div class="step"><strong>rollout</strong><br><code>rollout.py</code><br>vLLM 生成 completion。</div>
+        <div class="step"><strong>reward</strong><br><code>aggregated_reward.py</code><br>返回标量 reward 和 dict。</div>
+        <div class="step"><strong>policy sample</strong><br><code>data_packer.py</code><br>拼接 prompt + completion。</div>
+        <div class="step"><strong>GRPO</strong><br><code>trainer.py</code><br>当前把标量 advantage 扩展到所有 token。</div>
+        <div class="step"><strong>model</strong><br><code>base_model.py</code><br>VLM forward 输出 logits。</div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>现状</th>
+            <th>改造目标</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>finetune/rl/rewards/aggregated_reward.py</code></td>
+            <td><code>compute_reward()</code> 只显式组合 <code>traj_L2</code> 和 <code>comfort_reward</code>。</td>
+            <td>变成 reward orchestrator：调用轨迹、CoC、一致性、风险 reward，并返回统一 breakdown。</td>
+          </tr>
+          <tr>
+            <td><code>finetune/rl/models/reasoning_vla/data_packer.py</code></td>
+            <td><code>get_policy_input()</code> 只生成 <code>labels_mask/logprob_masks</code>。</td>
+            <td>额外生成 <code>coc_logprob_masks</code>、<code>traj_logprob_masks</code>、<code>format_logprob_masks</code>、<code>reward_components</code>。</td>
+          </tr>
+          <tr>
+            <td><code>finetune/rl/models/reasoning_vla/trainer.py</code></td>
+            <td><code>advantages_t</code> 被 expand 到 <code>[B,L]</code>，所有 completion token 同权。</td>
+            <td>如果开启 routing，则按 mask 构造 token 级 advantage matrix。</td>
+          </tr>
+          <tr>
+            <td><code>src/alpamayo1_5/diffusion/flow_matching.py</code></td>
+            <td>只有监督 flow matching loss。</td>
+            <td>增加 RL 友好的 flow loss proxy，但建议放到新 trainer 中调用，避免污染 SFT。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>2. Phase 1：Reward Breakdown 基础设施</h2>
+      <h3>新增文件</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+            <th>关键函数</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>finetune/rl/rewards/reward_types.py</code></td>
+            <td>定义 reward 分量的数据结构，避免 dict key 到处散落。</td>
+            <td><code>RewardComponents</code> dataclass，<code>to_dict()</code>。</td>
+          </tr>
+          <tr>
+            <td><code>finetune/rl/rewards/coc_reward.py</code></td>
+            <td>解析 CoC、meta action，并做规则型可验证打分。</td>
+            <td><code>extract_coc_sections()</code>、<code>compute_coc_reward()</code>。</td>
+          </tr>
+          <tr>
+            <td><code>finetune/rl/rewards/consistency_reward.py</code></td>
+            <td>检查 CoC 里提到的意图是否与轨迹方向/速度变化一致。</td>
+            <td><code>compute_reasoning_action_consistency()</code>。</td>
+          </tr>
+          <tr>
+            <td><code>finetune/rl/rewards/risk_reward.py</code></td>
+            <td>根据 reference 里的 road/lane/obstacle 字段做轻量安全 proxy。</td>
+            <td><code>compute_risk_reward()</code>、<code>infer_risk_tags()</code>。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>修改 <code>aggregated_reward.py</code></h3>
+      <p>保持旧权重 <code>traj_l2_weight</code>、<code>comfort_weight</code> 必填；新权重默认 0 或开关关闭。这样旧 TOML 不会改变训练行为。</p>
+      <pre><code>def compute_reward(...):
+    traj = compute_traj_reward(...)
+    comfort = compute_comfort_reward(...)
+
+    if cfg.enable_coc_reward:
+        coc = compute_coc_reward(to_be_evaluated, reference)
+    else:
+        coc = 0.0
+
+    if cfg.enable_consistency_reward:
+        consistency = compute_reasoning_action_consistency(...)
+    else:
+        consistency = 0.0
+
+    final_reward = (
+        w.traj_l2_weight * traj.reward
+        + w.comfort_weight * comfort.reward
+        + w.coc_weight * coc
+        + w.consistency_weight * consistency
+        + w.risk_weight * risk
+    )
+
+    return final_reward, {
+        "reward": final_reward,
+        "traj_reward": traj.reward,
+        "traj_L2": traj.ade,
+        "comfort_reward": comfort.reward,
+        "coc_reward": coc,
+        "consistency_reward": consistency,
+        "risk_reward": risk,
+        "format_ok": format_ok,
+    }</code></pre>
+
+      <h3>新增 TOML 配置</h3>
+      <pre><code>[custom.alpamayo.reward]
+traj_l2_weight = 0.4
+comfort_weight = 0.1
+
+enable_coc_reward = false
+coc_weight = 0.0
+enable_consistency_reward = false
+consistency_weight = 0.0
+enable_risk_reward = false
+risk_weight = 0.0
+invalid_format_penalty = -1.0
+missing_cot_penalty = -0.2</code></pre>
+    </section>
+
+    <section>
+      <h2>3. Phase 2：CoC/轨迹 Token Mask 路由</h2>
+      <p>当前 <code>data_packer.py::get_policy_input()</code> 在拼接 completion 后只创建了 <code>labels_mask</code>，表示哪些 token 参与 logprob loss。我们需要在同一位置创建更细的 mask。</p>
+      <h3>修改点</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>函数</th>
+            <th>修改内容</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>get_policy_input()</code></td>
+            <td>保存 <code>prompt_len</code>，在 <code>new_ids_row</code> 上查找 <code>&lt;|cot_end|&gt;</code>、<code>&lt;|traj_future_start|&gt;</code>、<code>&lt;|traj_future_end|&gt;</code>，构造三类 mask。</td>
+          </tr>
+          <tr>
+            <td><code>policy_collate_fn()</code></td>
+            <td>把 tokenized_data 中的 mask concat 到 batch 顶层：<code>coc_logprob_masks</code>、<code>traj_logprob_masks</code>、<code>format_logprob_masks</code>。</td>
+          </tr>
+          <tr>
+            <td>临时 debug</td>
+            <td>删除当前 <code>print("[DEBUG] ...")</code>，改成受配置控制的 logger debug，避免 8 卡训练刷屏。</td>
+          </tr>
+        </tbody>
+      </table>
+      <pre><code>def build_completion_token_masks(input_ids, prompt_len, special_ids):
+    completion = torch.zeros_like(input_ids, dtype=torch.bool)
+    completion[prompt_len:] = True
+
+    coc = torch.zeros_like(completion)
+    traj = torch.zeros_like(completion)
+    fmt = torch.zeros_like(completion)
+
+    cot_end = first_pos(input_ids, special_ids["cot_end"], start=prompt_len)
+    traj_start = first_pos(input_ids, special_ids["traj_future_start"], start=prompt_len)
+    traj_end = first_pos(input_ids, special_ids["traj_future_end"], start=prompt_len)
+
+    if cot_end is not None:
+        coc[prompt_len:cot_end + 1] = True
+    if traj_start is not None and traj_end is not None:
+        traj[traj_start:traj_end + 1] = True
+    fmt[input_ids == special_ids["cot_end"]] = True
+    fmt[input_ids == special_ids["traj_future_start"]] = True
+    fmt[input_ids == special_ids["traj_future_end"]] = True
+
+    return {
+        "logprob_masks": completion,
+        "coc_logprob_masks": coc & completion,
+        "traj_logprob_masks": traj & completion,
+        "format_logprob_masks": fmt & completion,
+    }</code></pre>
+      <div class="callout gold">
+        注意：mask 的 shape 必须和 <code>input_ids</code> 一样，保持 <code>compute_logprobs()</code> 能直接消费。不要在这里 shift mask，沿用现有 trainer 的约定，避免 off-by-one。
+      </div>
+    </section>
+
+    <section>
+      <h2>4. Phase 3：Per-token Advantage GRPO</h2>
+      <p>Cosmos 传给 trainer 的 <code>rollout.advantage</code> 是标量。为了稳定，不建议第一版改 Cosmos dispatcher，而是在 policy 侧根据 completion 重新计算 reward components，再在 trainer 里做组内归一化。</p>
+
+      <h3>数据字段</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>字段</th>
+            <th>来源</th>
+            <th>shape / 类型</th>
+            <th>用途</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>reward_components</code></td>
+            <td><code>get_policy_input()</code> 调用 reward helper 重新计算</td>
+            <td>dict[str, float]</td>
+            <td>用于构造 component advantage 和日志。</td>
+          </tr>
+          <tr>
+            <td><code>coc_logprob_masks</code></td>
+            <td>token mask builder</td>
+            <td><code>[B,L]</code> bool</td>
+            <td>CoC token 的 advantage 路由。</td>
+          </tr>
+          <tr>
+            <td><code>traj_logprob_masks</code></td>
+            <td>token mask builder</td>
+            <td><code>[B,L]</code> bool</td>
+            <td>轨迹 token 的 advantage 路由。</td>
+          </tr>
+          <tr>
+            <td><code>format_logprob_masks</code></td>
+            <td>token mask builder</td>
+            <td><code>[B,L]</code> bool</td>
+            <td>格式 token 可用较小权重，防止破坏 special token 结构。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>trainer 修改</h3>
+      <p>新增私有函数，不直接改 <code>compute_loss()</code>，因为它已经接受 <code>[B,L]</code> advantage。</p>
+      <pre><code>def _build_token_advantages(
+    self,
+    scalar_advantages,        # [B]
+    user_mini_batch,          # contains masks
+    component_advantages,     # dict[str, Tensor[B]]
+    computed_max_len,
+):
+    base = scalar_advantages.unsqueeze(1).expand(-1, computed_max_len)
+    if not cfg.advantage_routing.enable:
+        return user_mini_batch["logprob_masks"] * base
+
+    routed = torch.zeros_like(base)
+    routed += user_mini_batch["coc_logprob_masks"] * component_advantages["coc"].unsqueeze(1)
+    routed += user_mini_batch["traj_logprob_masks"] * component_advantages["traj"].unsqueeze(1)
+    routed += user_mini_batch["format_logprob_masks"] * component_advantages["format"].unsqueeze(1)
+
+    fallback = user_mini_batch["logprob_masks"] & ~(coc_mask | traj_mask | format_mask)
+    routed += fallback * base
+    return routed</code></pre>
+
+      <h3>组内归一化</h3>
+      <p>rollouts 通常来自同一 prompt 的 <code>n_generation</code> 多个 completion。第一版按 <code>(split, idx)</code> 分组，对每个 component 做 z-score；如果组大小小于 2，则回退到 Cosmos 标量 advantage。</p>
+      <pre><code>component_adv = normalize_by_prompt_group(
+    payloads=payloads_list,
+    components=[sample["reward_components"] for sample in processed_samples],
+    fallback=advantages_t,
+)</code></pre>
+    </section>
+
+    <section>
+      <h2>5. Phase 4：Flow Expert RL</h2>
+      <p>这一阶段不要直接塞进现有 ReasoningVLA GRPO trainer。建议新增一个 flow RL 训练路径，先复用 SFT stage2 的 action expert forward，再引入 FPO-style objective。</p>
+      <table>
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>新增/修改</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>finetune/rl/models/flow_action/</code></td>
+            <td>新增目录</td>
+            <td>放 flow action expert RL 的 trainer、data packer、entry，避免污染 reasoning_vla 路径。</td>
+          </tr>
+          <tr>
+            <td><code>src/alpamayo1_5/diffusion/flow_matching.py</code></td>
+            <td>可选新增 <code>compute_vector_field_mse()</code></td>
+            <td>把已有 <code>compute_loss_from_pred()</code> 的 reduction 拆开，得到 per-sample loss。</td>
+          </tr>
+          <tr>
+            <td><code>finetune/sft/models/sft_alpamayo1_5.py</code></td>
+            <td>参考，不建议直接大改</td>
+            <td>复用 stage2 的 action expert 调用方式：<code>action_in_proj -> expert -> action_out_proj</code>。</td>
+          </tr>
+        </tbody>
+      </table>
+      <pre><code>old_loss = flow_mse_per_sample(v_old, target).detach()
+new_loss = flow_mse_per_sample(v_theta, target)
+ratio_proxy = torch.exp(torch.clamp(old_loss - new_loss, -5.0, 5.0))
+
+surrogate_1 = ratio_proxy * advantage
+surrogate_2 = ratio_proxy.clamp(1 - eps, 1 + eps) * advantage
+loss_fpo = -torch.minimum(surrogate_1, surrogate_2).mean()
+loss_anchor = beta_ref * mse(v_theta, v_ref.detach())
+loss = loss_fpo + loss_anchor + beta_sft * new_loss.mean()</code></pre>
+      <div class="callout red">
+        Flow RL 是第二轮实现重点。第一轮如果先把 CoC/traj token routing 跑通，论文就已经有可展示的新算法；Flow expert RL 再作为增强版本，能降低整体调试风险。
+      </div>
+    </section>
+
+    <section>
+      <h2>6. 日志、评估与测试</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>层级</th>
+            <th>新增指标</th>
+            <th>失败时看什么</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Reward</td>
+            <td><code>reward/traj</code>、<code>reward/coc</code>、<code>reward/consistency</code>、<code>reward/risk</code>、<code>format_ok_rate</code></td>
+            <td>reward 方差是否为 0；format penalty 是否过强；CoC reward 是否全正或全负。</td>
+          </tr>
+          <tr>
+            <td>Mask</td>
+            <td><code>mask/coc_tokens</code>、<code>mask/traj_tokens</code>、<code>mask/format_tokens</code></td>
+            <td>mask 是否全 0；是否把 prompt token 错算进 completion。</td>
+          </tr>
+          <tr>
+            <td>GRPO</td>
+            <td><code>adv/coc_mean</code>、<code>adv/traj_mean</code>、<code>adv/routed_norm</code>、<code>kl/ref</code></td>
+            <td>loss 爆炸、grad norm 爆炸、某类 token advantage 绝对值过大。</td>
+          </tr>
+          <tr>
+            <td>Flow</td>
+            <td><code>flow/new_mse</code>、<code>flow/old_mse</code>、<code>flow/ratio_proxy</code>、<code>flow/anchor_mse</code></td>
+            <td>ratio proxy 是否饱和；anchor 是否太弱导致轨迹漂移。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>本地可跑的轻量测试</h3>
+      <pre><code>python -m pytest finetune/rl/rewards/test_coc_reward.py
+python -m pytest finetune/rl/models/reasoning_vla/test_token_masks.py
+python -m pytest finetune/rl/models/reasoning_vla/test_advantage_routing.py</code></pre>
+      <p>如果当前项目没有 pytest 依赖，可以先写成普通 Python smoke test，放在 <code>finetune/rl/tests/</code>，保证不需要模型权重也能测试字符串解析、mask 和 advantage routing。</p>
+    </section>
+
+    <section>
+      <h2>7. 推荐提交顺序</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>PR/commit</th>
+            <th>内容</th>
+            <th>服务器验证</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Commit 1</td>
+            <td>Reward dataclass + CoC parser + reward breakdown，默认关闭新 reward。</td>
+            <td>启动 rollout，确认旧 reward 数值与之前一致；日志出现新字段。</td>
+          </tr>
+          <tr>
+            <td>Commit 2</td>
+            <td>Token masks + 删除 debug print + mask smoke tests。</td>
+            <td>跑 1 个 step，确认 mask 非零且训练不慢太多。</td>
+          </tr>
+          <tr>
+            <td>Commit 3</td>
+            <td>Per-token advantage routing，默认关闭。</td>
+            <td>先关闭 routing 跑 baseline，再打开 routing 对比 loss/reward。</td>
+          </tr>
+          <tr>
+            <td>Commit 4</td>
+            <td>打开 CoC/consistency reward 的实验 TOML。</td>
+            <td>跑 500-2000 step，观察 reward 分布、format_ok、ADE。</td>
+          </tr>
+          <tr>
+            <td>Commit 5</td>
+            <td>Flow expert RL prototype。</td>
+            <td>冻结 VLM，短跑确认 flow loss、ratio proxy 和轨迹 decode 正常。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>8. 第一轮我建议实际实现的范围</h2>
+      <div class="callout green">
+        先实现 Commit 1-3：reward breakdown、CoC/consistency 的规则版本、token mask、per-token advantage routing。它们足以支撑 Causal Flow-GRPO 的离散版本论文实验，而且不会要求本机有 A100 或完整数据挂载。
+      </div>
+      <p>第一轮不建议马上实现完整 Flow expert RL，因为它涉及 action expert 的采样、old/ref expert 缓存、per-sample flow loss、以及和 closed-loop reward 的耦合。等服务器上确认 Commit 1-3 的 reward 和训练曲线稳定后，再加 Flow RL，会明显减少反复部署和 debug。</p>
+    </section>
+  </main>
+</body>
+</html>
