@@ -105,6 +105,7 @@
   <li><a href="#sec-analysis">一、现有方案分析与 CoC-轨迹差距根源</a></li>
   <li><a href="#sec-innovation1">二、创新点一：层次化因果一致奖励模型 (HCC-RM)</a></li>
   <li><a href="#sec-innovation2">三、创新点二：Pareto 引导多目标 GRPO (PGMO-GRPO)</a></li>
+  <li><a href="#sec-innovation3">三-B、创新点三：组序列策略优化 (GSPO)</a></li>
   <li><a href="#sec-value">四、预期价值量化分析</a></li>
   <li><a href="#sec-implementation">五、实现路径与代码修改清单</a></li>
   <li><a href="#sec-conclusion">六、总结与投稿策略</a></li>
@@ -450,6 +451,177 @@ R = \begin{cases}
 </table>
 </div>
 
+<!-- ======== Section 3b: GSPO ======== -->
+<h2 id="sec-innovation3">三-B、创新点三：组序列策略优化 <span class="tag orange">GSPO</span></h2>
+
+<div class="card green">
+<p><strong>全称</strong>：Group Sequence Policy Optimization (GSPO)<br>
+<strong>来源</strong>：Zheng et al. (Qwen Team, Alibaba), arXiv:2507.18071 — 用于训练 Qwen3 模型<br>
+<strong>核心思想</strong>：将 GRPO 的 token 级重要性采样修正为 <strong>序列级重要性采样</strong>，
+从根本上解决 GRPO 因误用 token 级 importance ratio 导致的理论不适定性 (ill-posedness)。<br>
+<strong>对标会议</strong>：ICML / NeurIPS — 首次将 GSPO 应用于 VLA 自动驾驶模型的 RL 训练。</p>
+</div>
+
+<h3>3B.1 GRPO 的根本问题：Token 级 Importance Ratio 的谬误</h3>
+
+<div class="card highlight">
+<h4>数学分析</h4>
+<p>
+GRPO 使用 token 级的概率比：\( \rho_t = \frac{\pi_\theta(a_t|s_t)}{\pi_{\text{old}}(a_t|s_t)} \)
+来估计重要性权重。但在强化学习中，<strong>重要性采样权重是对完整轨迹（序列）定义的</strong>，不是对单个 token：
+</p>
+
+<div class="formula">
+\[
+w(\tau) = \prod_{t=1}^{T} \frac{\pi_\theta(a_t|s_t)}{\pi_{\text{old}}(a_t|s_t)}
+= \exp\left(\sum_{t=1}^{T} \log\pi_\theta(a_t|s_t) - \sum_{t=1}^{T} \log\pi_{\text{old}}(a_t|s_t)\right)
+\]
+</div>
+
+<p>GRPO 在 token 级别独立裁剪每个 \( \rho_t \)，这在理论上是不适用的，因为：</p>
+<ul>
+  <li><strong>Token 间相互依赖</strong>：序列中每个 token 的条件概率取决于前面的 token，独立处理违反因果结构</li>
+  <li><strong>方差估计偏差</strong>：token 级裁剪可能导致梯度估计的方差被系统性低估或高估</li>
+  <li><strong>收敛不稳定</strong>：Zheng et al. 证明 GRPO 在某些条件下会收敛到错误策略</li>
+</ul>
+</div>
+
+<h3>3B.2 GSPO 的核心改进：序列级优化</h3>
+
+<div class="arch-diagram">
+┌─────────────────────────────────────────────────────────────┐
+│          GRPO vs GSPO：重要性比率的计算差异                    │
+│                                                              │
+│  GRPO (Token-level):                                         │
+│  ├─ ρ_t = exp(log π_θ_t - log π_old_t)   每 token 独立       │
+│  ├─ clip(ρ_t, 1-ε, 1+ε)                 每 token 独立裁剪    │
+│  └─ L = -1/Σ_mask Σ_t clip(ρ_t)*A_t / N  token 级平均       │
+│                                                              │
+│  GSPO (Sequence-level):                                      │
+│  ├─ w_i = exp(Σ_t log π_θ_t - Σ_t log π_old_t)  整条序列    │
+│  ├─ clip(w_i, 1-ε, 1+ε)                       序列级裁剪     │
+│  └─ L = -1/G Σ_i w_i * A_i / N_unclipped      序列级归一化   │
+│                                                              │
+│  关键差异：GSPO 仅对未裁剪样本归一化（N_unclipped）           │
+│  而非所有样本。这避免了裁剪样本"污染"梯度估计。               │
+└─────────────────────────────────────────────────────────────┘
+</div>
+
+<h3>3B.3 GSPO Loss 的完整形式</h3>
+
+<div class="card">
+<pre><code>def gspo_loss(sequences, old_logps, advantages, epsilon):
+    """GSPO 序列级优化目标"""
+    for each sequence i in group G:
+        # 序列级概率比
+        w_i = exp(sum(log π_θ) - sum(log π_old))
+
+        # 序列级裁剪
+        w_i_clipped = clamp(w_i, 1-ε, 1+ε)
+
+        # 保守损失（类似 PPO 的 max/min 逻辑）
+        L_i = max(-w_i * A_i, -w_i_clipped * A_i) if A_i > 0
+            = min(-w_i * A_i, -w_i_clipped * A_i) if A_i <= 0
+
+    # 仅对未裁剪样本归一化
+    N_unclipped = count(i where 1-ε <= w_i <= 1+ε)
+    L_GSPO = sum(L_i) / max(N_unclipped, 1)
+
+    return L_GSPO</code></pre>
+</div>
+
+<h3>3B.4 GSPO 在 Alpamayo VLA 中的独特优势</h3>
+
+<div class="comparison">
+<div class="card">
+<h4 style="margin-top:0">VLA 序列的特性</h4>
+<ul>
+  <li>一条 completion 包含：<strong>CoC推理文本 + Meta token + 轨迹token</strong></li>
+  <li>推理文本和轨迹之间存在 <strong>因果依赖关系</strong></li>
+  <li>轨迹 token 的语义依赖于前面的 CoC token（"前面有车" → "减速" → 轨迹坐标）</li>
+</ul>
+</div>
+<div class="card">
+<h4 style="margin-top:0">GSPO 如何解决</h4>
+<ul>
+  <li><strong>序列级优化</strong>：一次性评估 "CoC+轨迹" 的整体质量</li>
+  <li><strong>因果完整性</strong>：序列级 ratio 天然保留了 token 间的因果依赖</li>
+  <li><strong>更稳定的训练</strong>：序列级裁剪 + 未裁剪归一化减少梯度噪声</li>
+</ul>
+</div>
+</div>
+
+<h3>3B.5 GSPO + PGMO 融合方案</h3>
+
+<div class="card highlight">
+<h4>GSPOTrainer = GSPO 序列级 Loss + PGMO 多目标增强</h4>
+<p>GSPOTrainer 继承 AlpamayoGRPOTrainer，同时融合两个创新：</p>
+
+<div class="formula">
+\[
+\mathcal{L}_{\text{GSPO-PGMO}} = \underbrace{-\frac{1}{|U|} \sum_{i \in U}
+\min\big(w_i A_i,\; \text{clip}(w_i, 1-\epsilon, 1+\epsilon) A_i\big)}_{\text{GSPO 序列级 Loss}}
++ \underbrace{\beta_t \cdot D_{KL}(\pi_\theta \| \pi_{\text{ref}})}_{\text{Adaptive KL}}
++ \underbrace{\lambda_{\text{contra}} \cdot \mathcal{L}_{\text{contrastive}}}_{\text{推理-动作对比学习}}
+\]
+</div>
+
+<p>其中 \( U \) 是未裁剪样本集合，\( w_i \) 是序列级重要性比率，\( A_i \) 是经过 Pareto 加权的多维 advantage。</p>
+
+<table>
+<tr><th>组件</th><th>来源</th><th>作用</th></tr>
+<tr><td>序列级 importance ratio</td><td>GSPO</td><td>理论正确的重要性采样，稳定训练</td></tr>
+<tr><td>Pareto 样本加权</td><td>PGMO</td><td>多目标前沿样本获得更高权重</td></tr>
+<tr><td>自适应 KL 调度</td><td>PGMO</td><td>一致性引导的探索-利用平衡</td></tr>
+<tr><td>对比推理-动作学习</td><td>PGMO</td><td>隐空间中的因果一致性约束</td></tr>
+</table>
+</div>
+
+<h3>3B.6 GSPO vs GRPO 理论对比</h3>
+
+<table>
+<tr><th>维度</th><th>GRPO</th><th>GSPO</th></tr>
+<tr>
+  <td><strong>Importance Ratio</strong></td>
+  <td>Token 级：\( \rho_t \) 每 token 独立</td>
+  <td>序列级：\( w_i \) 整条序列</td>
+</tr>
+<tr>
+  <td><strong>裁剪策略</strong></td>
+  <td>Per-token clip</td>
+  <td>Per-sequence clip</td>
+</tr>
+<tr>
+  <td><strong>归一化</strong></td>
+  <td>所有 token 平均</td>
+  <td>仅未裁剪样本归一化</td>
+</tr>
+<tr>
+  <td><strong>理论基础</strong></td>
+  <td>近似（理论不适定）</td>
+  <td>严格重要性采样（理论正确）</td>
+</tr>
+<tr>
+  <td><strong>训练稳定性</strong></td>
+  <td>中等（token 级噪声较大）</td>
+  <td>较高（序列级噪声更小）</td>
+</tr>
+<tr>
+  <td><strong>VLA 适用性</strong></td>
+  <td>破坏 CoC-轨迹因果链</td>
+  <td>保留因果链完整性</td>
+</tr>
+</table>
+
+<h3>3B.7 代码文件变更</h3>
+<table>
+<tr><th>文件</th><th>变更内容</th></tr>
+<tr><td><code>finetune/rl/utils/gspo_loss.py</code></td><td><strong>新建</strong>：序列级 importance ratio 计算 + clipping + 归一化</td></tr>
+<tr><td><code>finetune/rl/models/reasoning_vla/gspo_trainer.py</code></td><td><strong>新建</strong>：GSPOTrainer，继承 AlpamayoGRPOTrainer，融合 PGMO 增强</td></tr>
+<tr><td><code>finetune/rl/models/reasoning_vla/alpamayo_cosmos_rl_post_training_entry.py</code></td><td><strong>修改</strong>：新增 GSPOTrainer import 和 trainer_type 文档</td></tr>
+<tr><td><code>finetune/rl/toml/alpamayo_rvla_rl_local_test.toml</code></td><td><strong>修改</strong>：新增 gspo_epsilon_low/high 参数，trainer_type=reasoning_vla_gspo_grpo</td></tr>
+</table>
+
 <!-- ======== Section 4 ======== -->
 <h2 id="sec-value">四、预期价值量化分析</h2>
 
@@ -618,6 +790,15 @@ contrastive_temperature = 0.07     # 新增：对比温度</code></pre>
   </span>
 </li><br>
 <li>
+  <strong>GSPO：组序列策略优化</strong><br>
+  <span style="color: var(--text-dim)">
+    将 GRPO 的 token 级重要性采样修正为序列级重要性采样，
+    从根本上解决 GRPO 的理论不适定性。序列级优化天然保留
+    CoC→轨迹的因果链，配合序列级裁剪和未裁剪归一化，
+    实现更稳定的训练和更快的收敛。
+  </span>
+</li><br>
+<li>
   <strong>系统级验证 + 可复现代码</strong><br>
   <span style="color: var(--text-dim)">
     在 NVIDIA Cosmos-RL 框架上完整实现，提供可复现的实验 pipeline，
@@ -631,7 +812,7 @@ contrastive_temperature = 0.07     # 新增：对比温度</code></pre>
 <h3 style="margin-top:0">为什么能发顶级会议？</h3>
 <table>
 <tr><th>标准</th><th>满足情况</th></tr>
-<tr><td><strong>Novelty 创新性</strong></td><td>✅ HCC-RM（层次化因果一致奖励）和 PGMO-GRPO（Pareto 多目标 GRPO）均为原创方法，在 VLA+RL 领域无先例</td></tr>
+<tr><td><strong>Novelty 创新性</strong></td><td>✅ HCC-RM（层次化因果一致奖励）、PGMO-GRPO（Pareto 多目标 GRPO）、GSPO（序列级优化）三个创新点，首次在 VLA+RL 领域系统引入</td></tr>
 <tr><td><strong>Significance 重要性</strong></td><td>✅ 解决端到端自动驾驶中推理-动作一致性的核心 open problem，方法可泛化到所有 VLA 模型</td></tr>
 <tr><td><strong>Soundness 严谨性</strong></td><td>✅ 7 组消融实验 + 多维指标 + 开放/闭合评估 + 训练稳定性分析</td></tr>
 <tr><td><strong>Clarity 清晰度</strong></td><td>✅ 方法设计从问题分析→理论推导→工程实现→实验验证，逻辑完整</td></tr>

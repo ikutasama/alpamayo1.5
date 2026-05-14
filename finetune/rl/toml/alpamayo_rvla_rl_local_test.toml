@@ -80,7 +80,7 @@ experiment_name = "RVLA_Post_Training"
 
 [train.train_policy]
 type = "grpo"
-trainer_type = "reasoning_vla_pgmo_grpo"
+trainer_type = "reasoning_vla_gspo_grpo"
 dataloader_shuffle = false
 dataset.split = "train"
 # Enable rank-based dispatch (mesh-rank sharding) so each replica consumes a stable shard.
@@ -170,6 +170,12 @@ contrastive_temperature = 0.07
 
 # Per-dimension objective weights [coc, raa, traj, comfort]
 objective_weights = [0.25, 0.25, 0.25, 0.25]
+
+# ---- GSPO: Group Sequence Policy Optimization ----
+# Sequence-level epsilon (clip range for importance ratio w_i)
+# GSPO clips at sequence level, not per-token like GRPO
+gspo_epsilon_low = 0.2
+gspo_epsilon_high = 0.28
 
 [custom.alpamayo.prefetch]
 

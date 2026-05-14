@@ -20,12 +20,14 @@ assembling a ``ModelSpec`` with all Cosmos-RL components — model wrapper,
 weight mapper, data packer, and reward function — and launching GRPO
 training on the PAI dataset.
 
-Supports two training modes (auto-detected from TOML):
+Supports three training modes (selected via COSMOS_TRAINER_TYPE env var):
   1. **Standard GRPO** (default): ReasoningVLAGRPOTrainer with legacy/aggregated reward.
   2. **PGMO-GRPO**: PGMOTrainer with HCC-RM reward, Pareto weighting,
      adaptive KL, and contrastive learning.
+  3. **GSPO**: GSPOTrainer with sequence-level importance ratio loss,
+     Pareto weighting, adaptive KL, and contrastive learning.
 
-PGMO-GRPO is enabled when ``[custom.alpamayo.pgmo].enable`` is true in TOML.
+GSPO is enabled when COSMOS_TRAINER_TYPE=reasoning_vla_gspo_grpo.
 """
 
 # ruff: noqa: E402
@@ -74,6 +76,13 @@ try:
 except ImportError as e:
     logger.debug(f"PGMO trainer not available (optional): {e}")
 
+# GSPO: register the Group Sequence Policy Optimization trainer
+# Import triggers Cosmos trainer registration via decorator
+try:
+    from rl.models.reasoning_vla.gspo_trainer import GSPOTrainer  # noqa: F401
+except ImportError as e:
+    logger.debug(f"GSPO trainer not available (optional): {e}")
+
 
 def _is_pgmo_enabled(config) -> bool:
     """Check whether PGMO-GRPO mode is enabled in TOML config."""
@@ -107,9 +116,12 @@ def _reasoning_vla_reward_fn(to_be_evaluated, reference=None, *args, config=None
     )
 
 
-# Build ModelSpec with PGMO support
+# Build ModelSpec with multi-trainer support
 # The trainer_type is set to "reasoning_vla_grpo" by default.
-# Set COSMOS_TRAINER_TYPE=reasoning_vla_pgmo_grpo to use PGMO.
+# Options:
+#   COSMOS_TRAINER_TYPE=reasoning_vla_grpo        → Standard GRPO
+#   COSMOS_TRAINER_TYPE=reasoning_vla_pgmo_grpo   → Pareto-Guided Multi-Objective GRPO
+#   COSMOS_TRAINER_TYPE=reasoning_vla_gspo_grpo   → Group Sequence Policy Optimization
 _trainer_type = os.environ.get(
     "COSMOS_TRAINER_TYPE", "reasoning_vla_grpo"
 )
