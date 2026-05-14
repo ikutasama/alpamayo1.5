@@ -80,7 +80,7 @@ experiment_name = "RVLA_Post_Training"
 
 [train.train_policy]
 type = "grpo"
-trainer_type = "reasoning_vla_grpo"
+trainer_type = "reasoning_vla_pgmo_grpo"
 dataloader_shuffle = false
 dataset.split = "train"
 # Enable rank-based dispatch (mesh-rank sharding) so each replica consumes a stable shard.
@@ -125,8 +125,51 @@ idx_rng_debug = false
 
 
 [custom.alpamayo.reward]
+# ---- Trajectory Quality - Legacy ----
 traj_l2_weight = 0.4
 comfort_weight = 0.1
+
+# ---- HCC-RM: Hierarchical Causal-Consistent Reward Model ----
+# Set enable_hcc = true (or add coc_quality_weight + raa_weight) to activate.
+# When disabled, falls back to legacy trajectory-only reward.
+enable_hcc = true
+
+# Layer 2 weight: CoC reasoning quality (0.0-1.0, share of total reward)
+coc_quality_weight = 0.15
+
+# Layer 3 weight: Reasoning-Action Alignment (0.0-1.0, share of total reward)
+raa_weight = 0.15
+
+# Layer 1 threshold: Scene understanding minimum score to pass gating
+scene_threshold = 0.3
+
+# CoC dimension weights (factual, coherence, safety, completeness)
+# coc_dim_weights = { factual = 0.25, coherence = 0.30, safety = 0.25, completeness = 0.20 }
+
+# ---- PGMO: Pareto-Guided Multi-Objective GRPO ----
+[custom.alpamayo.pgmo]
+# Master switch: enable PGMO-GRPO extensions
+enable = true
+
+# Pareto-optimal sample weighting (boost Pareto-frontier samples)
+enable_pareto_weighting = true
+# Base weight multiplier for Pareto-optimal samples
+pareto_base_weight = 1.5
+
+# Adaptive KL divergence scheduling (consistency-guided)
+enable_adaptive_kl = true
+# Decay rate for adaptive KL: higher = more sensitive to RAA changes
+adaptive_kl_lambda = 2.0
+
+# Contrastive Reasoning-Action Learning
+enable_contrastive = true
+# Weight for contrastive loss term
+contrastive_weight = 0.05
+# Temperature for contrastive softmax
+contrastive_temperature = 0.07
+
+# Per-dimension objective weights [coc, raa, traj, comfort]
+objective_weights = [0.25, 0.25, 0.25, 0.25]
 
 [custom.alpamayo.prefetch]
 

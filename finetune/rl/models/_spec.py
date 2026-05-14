@@ -38,6 +38,7 @@ class ModelSpec:
     hydra_config_path: str
     hydra_config_name: str
     hydra_overrides: list[str]
+    trainer_type: str = "reasoning_vla_grpo"  # Override via env: COSMOS_TRAINER_TYPE
 
     def launch(self, ckpt_path: str | None = None) -> None:
         from rl.launcher import launch_alpamayo_model

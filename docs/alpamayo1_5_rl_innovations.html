@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alpamayo 1.5 RL 创新改进方案：面向顶级会议的强化学习增强</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --accent3: #d2a8ff;
+    --warn: #d29922;
+    --danger: #f85149;
+    --code-bg: #1c2128;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.7;
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem;
+  }
+  h1 { font-size: 2.2rem; color: #fff; text-align: center; margin-bottom: 0.5rem;
+       background: linear-gradient(135deg, var(--accent), var(--accent3)); -webkit-background-clip: text;
+       -webkit-text-fill-color: transparent; }
+  h2 { font-size: 1.6rem; color: var(--accent); margin: 2.5rem 0 1rem; padding-bottom: 0.4rem;
+       border-bottom: 2px solid var(--border); }
+  h3 { font-size: 1.25rem; color: var(--accent2); margin: 1.5rem 0 0.7rem; }
+  h4 { font-size: 1.05rem; color: var(--accent3); margin: 1rem 0 0.5rem; }
+  p, li { margin-bottom: 0.6rem; }
+  ul, ol { padding-left: 1.5rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .meta { text-align: center; color: var(--text-dim); font-size: 0.9rem; margin-bottom: 2rem; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 1.5rem; margin: 1rem 0;
+  }
+  .card.highlight { border-color: var(--accent); box-shadow: 0 0 12px rgba(88,166,255,0.15); }
+  .card.green { border-color: var(--accent2); }
+  code {
+    background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 4px;
+    font-family: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace; font-size: 0.9em;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 1rem; overflow-x: auto; font-size: 0.85rem; margin: 0.8rem 0;
+  }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { padding: 0.6rem 0.8rem; border: 1px solid var(--border); text-align: left; }
+  th { background: var(--code-bg); color: var(--accent); font-weight: 600; }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  .tag {
+    display: inline-block; padding: 0.15em 0.55em; border-radius: 12px; font-size: 0.78rem;
+    font-weight: 600; margin-right: 0.3rem;
+  }
+  .tag.blue { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .tag.green { background: rgba(63,185,80,0.15); color: var(--accent2); }
+  .tag.purple { background: rgba(210,168,255,0.15); color: var(--accent3); }
+  .tag.orange { background: rgba(210,153,34,0.15); color: var(--warn); }
+  .formula {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 1rem; margin: 1rem 0; text-align: center; font-size: 1.05rem;
+  }
+  .toc { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+         padding: 1.2rem 1.5rem; margin: 1.5rem 0; }
+  .toc details summary { cursor: pointer; font-weight: 600; color: var(--accent); margin-bottom: 0.5rem; }
+  .toc ul { list-style: none; padding-left: 0; }
+  .toc ul li { margin-bottom: 0.3rem; }
+  .comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1rem 0; }
+  @media (max-width: 700px) { .comparison { grid-template-columns: 1fr; } }
+  .expected-value { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1rem 0; }
+  .metric-box {
+    background: var(--code-bg); border: 1px solid var(--accent2); border-radius: 6px;
+    padding: 0.8rem 1rem; text-align: center; min-width: 130px; flex: 1;
+  }
+  .metric-box .label { font-size: 0.8rem; color: var(--text-dim); }
+  .metric-box .value { font-size: 1.4rem; font-weight: 700; color: var(--accent2); }
+  .arch-diagram {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 1.5rem; margin: 1rem 0; text-align: center; font-family: monospace;
+    white-space: pre; overflow-x: auto;
+  }
+</style>
+</head>
+<body>
+
+<h1>Alpamayo 1.5 RL 创新改进方案</h1>
+<div class="meta">
+  <strong>面向顶级会议（ICML / AAAI / NeurIPS）的高价值强化学习方法</strong><br>
+  基于 <a href="https://arxiv.org/abs/2511.00088" target="_blank">Alpamayo-R1 论文</a> 及现有 v0 代码库深度分析<br>
+  生成日期：2026-05-14
+</div>
+
+<!-- ======== TOC ======== -->
+<div class="toc">
+<details open>
+<summary>📑 目录</summary>
+<ul>
+  <li><a href="#sec-analysis">一、现有方案分析与 CoC-轨迹差距根源</a></li>
+  <li><a href="#sec-innovation1">二、创新点一：层次化因果一致奖励模型 (HCC-RM)</a></li>
+  <li><a href="#sec-innovation2">三、创新点二：Pareto 引导多目标 GRPO (PGMO-GRPO)</a></li>
+  <li><a href="#sec-value">四、预期价值量化分析</a></li>
+  <li><a href="#sec-implementation">五、实现路径与代码修改清单</a></li>
+  <li><a href="#sec-conclusion">六、总结与投稿策略</a></li>
+</ul>
+</details>
+</div>
+
+<!-- ======== Section 1 ======== -->
+<h2 id="sec-analysis">一、现有方案分析与 CoC-轨迹差距根源</h2>
+
+<div class="card highlight">
+<h3>1.1 当前 RL 方案架构回顾</h3>
+<p>
+  Alpamayo 1.5 使用 <strong>GRPO (Group Relative Policy Optimization)</strong> 通过 Cosmos-RL 框架对 VLM Backbone 进行 RL 后训练。核心流程为：
+</p>
+<ol>
+  <li><strong>Rollout 生成</strong>：vLLM 引擎对每个 prompt 生成 N=12 条 completion（推理文本 + 离散轨迹 token）</li>
+  <li><strong>Reward 计算</strong>：从 completion 中提取轨迹 token → decode 为 (x, y, yaw) 坐标 → 计算 ADE + Comfort</li>
+  <li><strong>Advantage 归一化</strong>：组内 Z-score 标准化 → 正 advantage 鼓励、负 advantage 抑制</li>
+  <li><strong>GRPO 更新</strong>：ratio = exp(current_logp - old_logp)，clipped loss + KL 惩罚</li>
+</ol>
+
+<h3>1.2 现有 Reward 函数的缺陷</h3>
+<div class="comparison">
+<div class="card">
+<h4 style="margin-top:0">✅ 已有（轨迹质量）</h4>
+<ul>
+  <li>ADE (Average Displacement Error) — L2 距离</li>
+  <li>Comfort — 6维舒适度量（加速度/jerk/yaw rate）</li>
+  <li>门控：ADE > 3m → reward = -1.0</li>
+</ul>
+</div>
+<div class="card">
+<h4 style="margin-top:0">❌ 缺失（推理相关）</h4>
+<ul>
+  <li>推理文本（CoC）<strong>完全不参与 reward</strong></li>
+  <li>无推理-动作一致性度量</li>
+  <li>无推理质量评估（准确性、完整性、因果链）</li>
+  <li>无场景理解验证</li>
+</ul>
+</div>
+</div>
+
+<h3>1.3 CoC-轨迹差距的五大根源</h3>
+<table>
+<tr><th>#</th><th>根源</th><th>影响</th><th>现象</th></tr>
+<tr>
+  <td>1</td>
+  <td><strong>奖励信号盲区</strong></td>
+  <td>RL 只优化轨迹质量，推理文本随轨迹"附带生成"但无独立信号</td>
+  <td>推理质量停滞，轨迹进步不带动推理进步</td>
+</tr>
+<tr>
+  <td>2</td>
+  <td><strong>因果链断裂</strong></td>
+  <td>模型可能生成"正确轨迹"配"错误推理"，reward 无法区分</td>
+  <td>推理-动作因果一致性退化</td>
+</tr>
+<tr>
+  <td>3</td>
+  <td><strong>单标量奖励信息压缩</strong></td>
+  <td>多维质量（推理准确性 + 轨迹精度 + 舒适度）被压缩为一个标量</td>
+  <td>优势信号噪声大，训练不稳定</td>
+</tr>
+<tr>
+  <td>4</td>
+  <td><strong>固定 KL 惩罚</strong></td>
+  <td>kl_beta 常数，不能根据训练阶段自适应调整</td>
+  <td>早期探索不足 / 后期收敛震荡</td>
+</tr>
+<tr>
+  <td>5</td>
+  <td><strong>组内信息利用不充分</strong></td>
+  <td>GRPO 仅用组内 mean/std 归一化，未利用样本间对比关系</td>
+  <td>好推理+坏轨迹 vs 坏推理+好轨迹 无法区分学习</td>
+</tr>
+</table>
+
+<h3>1.4 论文中的关键证据</h3>
+<div class="card">
+<p>论文 Alpamayo-R1 明确报告：</p>
+<ul>
+  <li>RL 后训练使 <strong>推理质量提升 45%</strong>、<strong>推理-动作一致性提升 37%</strong></li>
+  <li>但当前公开代码 <strong>缺少推理 reward 实现</strong>（README 标注为 "demo implementation"）</li>
+  <li>论文提到 "Alpamayo 1.5 was RL post-trained with reasoning reward applied to the chain-of-causation portion" — 此实现在公开代码中 <strong>未包含</strong></li>
+</ul>
+<p>这为我们的创新提供了天然的动机：<strong>在公开 baselines 基础上构建可发表的推理增强 RL 方法</strong>。</p>
+</div>
+</div>
+
+<!-- ======== Section 2 ======== -->
+<h2 id="sec-innovation1">二、创新点一：层次化因果一致奖励模型 <span class="tag blue">HCC-RM</span></h2>
+
+<div class="card green">
+<p><strong>全称</strong>：Hierarchical Causal-Consistent Reward Model<br>
+<strong>核心思想</strong>：将单一轨迹 reward 扩展为 <strong>四层结构化奖励体系</strong>，逐层把关推理质量和推理-动作一致性。<br>
+<strong>对标会议</strong>：ICML / NeurIPS — 首次在 VLA 的 RL 训练中引入层次化因果一致性奖励。</p>
+</div>
+
+<h3>2.1 四层奖励架构</h3>
+
+<div class="arch-diagram">
+┌─────────────────────────────────────────────────────────────┐
+│                  HCC-RM 层次化奖励架构                        │
+│                                                              │
+│  Layer 1: 场景理解验证 (Scene Understanding)                  │
+│  ├─ 检查 CoC 文本提到的事故/障碍物/交通标志是否确实存在        │
+│  └─ 奖励: s₁ ∈ [0, 1] — 场景描述准确性                       │
+│                        │                                     │
+│                        ▼                                     │
+│  Layer 2: 因果推理质量 (Causal Coherence)                     │
+│  ├─ 评估"观察→分析→决策→动作"推理链的逻辑连贯性               │
+│  ├─ 使用预训练的 CoC Scorer (小型 LLM fine-tune)             │
+│  └─ 奖励: s₂ ∈ [0, 1] — 因果链合理性                         │
+│                        │                                     │
+│                        ▼                                     │
+│  Layer 3: 推理-动作一致性 (Reasoning-Action Alignment)        │
+│  ├─ 从 CoC 提取关键约束 (如"前方有车减速"、"右转")            │
+│  ├─ 检查生成轨迹是否满足这些约束                              │
+│  └─ 奖励: s₃ ∈ [0, 1] — 推理与动作的因果对齐度               │
+│                        │                                     │
+│                        ▼                                     │
+│  Layer 4: 轨迹质量 (Trajectory Quality)                       │
+│  ├─ ADE (L2 位移误差) + Comfort (加速度/jerk/yaw)            │
+│  └─ 奖励: s₄ ∈ [-1, 0] — 轨迹物理质量                        │
+│                                                              │
+│  最终奖励: R = s₁ · [α·s₂ + β·s₃ + γ·s₄]  (层次门控)       │
+└─────────────────────────────────────────────────────────────┘
+</div>
+
+<h3>2.2 Layer 3 详解：推理-动作一致性 (RAA) 的核心实现</h3>
+
+<p>这是最具创新性的部分。从 CoC 文本中提取结构化约束，然后验证轨迹是否满足：</p>
+
+<pre><code># 推理-动作一致性度量伪代码
+def compute_raa_score(coc_text: str, trajectory: Tensor) -> float:
+    # Step 1: 从CoC文本提取关键约束
+    constraints = extract_constraints(coc_text)
+    # → e.g., {"decelerate": True, "turn_right": True, "keep_lane": False}
+
+    # Step 2: 从轨迹中推断实际行为
+    inferred = infer_behavior_from_trajectory(trajectory)
+    # → e.g., {"decelerate": True, "turn_right": False, "keep_lane": True}
+
+    # Step 3: 计算一致性
+    consistency = agreement(constraints, inferred)  # Jaccard / F1
+
+    # Step 4: 连续性验证（轨迹是否平滑变化符合推理中的"渐进"描述）
+    smoothness = check_temporal_coherence(trajectory, constraints)
+
+    return 0.5 * consistency + 0.5 * smoothness</code></pre>
+
+<h3>2.3 Layer 2 详解：CoC Scorer 实现方案</h3>
+
+<div class="card">
+<p><strong>方案一（轻量级，推荐首期实现）：规则+模板混合</strong></p>
+<ul>
+  <li>定义 12 个驾驶维度的规则模板（危险识别、意图预测、安全距离、交通规则遵守等）</li>
+  <li>使用关键词匹配 + 正则表达式检查 CoC 文本是否覆盖关键维度</li>
+  <li>使用句子嵌入（e.g., all-MiniLM-L6-v2）计算 CoC 与 GT CoC 的语义相似度</li>
+</ul>
+</div>
+
+<div class="card">
+<p><strong>方案二（高精度，推荐用于最终实验）：小型 LLM Judge</strong></p>
+<ul>
+  <li>Fine-tune Llama-3.2-1B 或 Qwen2.5-0.5B 在 CoC 数据集上做质量评分</li>
+  <li>评分维度：Factual Accuracy / Causal Logic / Safety Awareness / Completeness</li>
+  <li>在 rollout 过程中异步调用（不阻塞 vLLM 生成），与轨迹 reward 并行计算</li>
+</ul>
+</div>
+
+<h3>2.4 层次门控机制</h3>
+
+<div class="formula">
+\[
+R = \begin{cases}
+  s_1 \cdot \big( \alpha\,s_2 + \beta\,s_3 + \gamma\,s_4 \big), & \text{if } s_1 > \tau_{\text{scene}} \\
+  -1.0, & \text{otherwise}
+\end{cases}
+\]
+</div>
+
+<p>其中 \(\tau_{\text{scene}} = 0.3\) 为场景理解阈值，确保基础场景认知不合格的样本不给高分。</p>
+
+<h3>2.5 代码文件变更计划</h3>
+<table>
+<tr><th>文件</th><th>变更内容</th></tr>
+<tr><td><code>finetune/rl/rewards/coc_reward.py</code></td><td><strong>新建</strong>：CoC 质量评分器 + 约束提取 + 一致性验证</td></tr>
+<tr><td><code>finetune/rl/rewards/hcc_reward.py</code></td><td><strong>新建</strong>：四层层次化奖励聚合（调用 coc_reward + comfort_reward + traj_reward）</td></tr>
+<tr><td><code>finetune/rl/rewards/aggregated_reward.py</code></td><td><strong>修改</strong>：入口改为调用 HCC reward，保留原有逻辑作为 fallback</td></tr>
+</table>
+</div>
+
+<!-- ======== Section 3 ======== -->
+<h2 id="sec-innovation2">三、创新点二：Pareto 引导多目标 GRPO <span class="tag purple">PGMO-GRPO</span></h2>
+
+<div class="card green">
+<p><strong>全称</strong>：Pareto-Guided Multi-Objective GRPO with Dynamic KL Re-weighting<br>
+<strong>核心思想</strong>：将 GRPO 从单标量 advantage 扩展到多目标空间，利用 Pareto 最优性引导组内样本加权，并引入自适应 KL 调度和对比学习。<br>
+<strong>对标会议</strong>：ICML / AAAI — 首次在多目标 GRPO 中引入 Pareto 最优性引导。</p>
+</div>
+
+<h3>3.1 多目标 Advantage 分解</h3>
+
+<p>当前 GRPO 使用标量 advantage：\(A = (r - \mu_r) / \sigma_r\)</p>
+
+<p>PGMO-GRPO 改为 <strong>多维 advantage 向量</strong>：</p>
+
+<div class="formula">
+\[
+\mathbf{A} = [A_{\text{coc}},\, A_{\text{align}},\, A_{\text{traj}},\, A_{\text{comfort}}]
+\]
+其中 \(A_k = (r_k - \mu_{r_k}) / \sigma_{r_k}\)（各维度独立归一化）
+</div>
+
+<p>每维度的含义：</p>
+<ul>
+  <li>\(A_{\text{coc}}\)：推理文本质量的标准化 advantage</li>
+  <li>\(A_{\text{align}}\)：推理-动作一致性的标准化 advantage</li>
+  <li>\(A_{\text{traj}}\)：轨迹 ADE 的标准化 advantage</li>
+  <li>\(A_{\text{comfort}}\)：驾驶舒适度的标准化 advantage</li>
+</ul>
+
+<h3>3.2 Pareto 最优样本识别与加权</h3>
+
+<div class="card highlight">
+<h4>核心算法</h4>
+<pre><code>def pareto_guided_weighting(samples: List[Sample]) -> Tensor:
+    """
+    在 GRPO 的 N 个组内生成中，识别 Pareto 前沿样本并赋予更高权重。
+    Pareto 最优定义：不存在其他样本在所有目标维度上都 >= 当前样本，
+    且至少有一个维度严格 >。
+    """
+    # Step 1: 构建目标矩阵 [N, 4]
+    objectives = torch.stack([
+        samples.coc_score, samples.align_score,
+        samples.traj_score, samples.comfort_score
+    ], dim=1)
+
+    # Step 2: 识别 Pareto 前沿
+    is_pareto = torch.ones(N, dtype=torch.bool)
+    for i in range(N):
+        for j in range(N):
+            if i == j: continue
+            # j dominates i?
+            if (objectives[j] >= objectives[i]).all() and \
+               (objectives[j] > objectives[i]).any():
+                is_pareto[i] = False
+                break
+
+    # Step 3: 计算 Pareto 加权
+    # Pareto 样本权重 = 1.5 (boost)，非Pareto = 1.0
+    weights = torch.where(is_pareto, 1.5, 1.0)
+
+    # Step 4: 距离加权（Pareto 样本中离理想点最近的更高权重）
+    ideal_point = objectives.max(dim=0).values
+    distances = torch.norm(objectives - ideal_point, dim=1)
+    pareto_dist_weights = 1.0 / (distances + 1e-6)
+    pareto_dist_weights = pareto_dist_weights / pareto_dist_weights[is_pareto].sum()
+    weights[is_pareto] *= (1.0 + pareto_dist_weights[is_pareto])
+
+    return weights  # 用于 advantage 加权</code></pre>
+</div>
+
+<h3>3.3 动态 KL 自适应调度</h3>
+
+<div class="card">
+<h4>动机</h4>
+<p>固定 <code>kl_beta</code> 存在两难：</p>
+<ul>
+  <li>太小 → 策略偏离 SFT 太远，推理能力退化（catastrophic forgetting）</li>
+  <li>太大 → 策略更新受限，RL 难以探索更优行为</li>
+</ul>
+
+<h4>方案：一致性引导的自适应 KL</h4>
+<div class="formula">
+\[
+\beta_t = \beta_{\text{base}} \cdot \exp\left(-\lambda \cdot \bar{s}_{\text{align}, t}\right)
+\]
+其中 \(\bar{s}_{\text{align}, t}\) 是最近 K 步的推理-动作一致性均值，
+\(\lambda\) 是衰减速率。
+</div>
+
+<p><strong>直觉</strong>：当一致性高时（策略值得信任），降低 KL 惩罚鼓励探索；
+当一致性低时（策略可能产生幻觉），增强 KL 惩罚保持稳定。</p>
+
+<pre><code>def adaptive_kl_beta(base_beta: float, align_history: List[float],
+                     lambda_decay: float = 2.0) -> float:
+    mean_align = np.mean(align_history[-100:])  # 最近100步平均
+    return base_beta * np.exp(-lambda_decay * mean_align)</code></pre>
+</div>
+
+<h3>3.4 对比推理-动作学习 (CRAL)</h3>
+
+<div class="card highlight">
+<h4>核心思想</h4>
+<p>在 GRPO 的组内样本中，显式对比 <strong>"好推理 + 好轨迹" vs "好推理 + 坏轨迹"</strong>，
+让模型学习到推理内容和轨迹之间的因果关系。</p>
+
+<h4>Contrastive GRPO Loss</h4>
+<div class="formula">
+\[
+\mathcal{L}_{\text{PGMO}} = \mathcal{L}_{\text{GRPO}}(\mathbf{w} \odot \mathbf{A}) + \lambda_{\text{contra}} \cdot \mathcal{L}_{\text{contrastive}}
+\]
+\[
+\mathcal{L}_{\text{contrastive}} = -\log \frac{\exp(\text{sim}(h_{\text{good}}, h_{\text{good}}) / \tau)}{\sum_{i} \exp(\text{sim}(h_{\text{good}}, h_i) / \tau)}
+\]
+</div>
+
+<p>其中 \(h_i\) 是 completion 的最后一层 hidden states 的均值池化表示。
+正样本对：推理质量高 AND 轨迹质量高的 completion；
+负样本对：推理质量高 BUT 轨迹质量低的 completion。</p>
+
+<p>这种对比损失鼓励模型学习到：<strong>好的推理应该对应好的轨迹 → 推理-动作的一致性编码在隐空间中</strong>。</p>
+</div>
+
+<h3>3.5 PGMO-GRPO 完整 Loss</h3>
+
+<div class="formula">
+\[
+\mathcal{L}_{\text{total}} = \underbrace{-\mathbb{E}\left[\sum_k w_k \cdot \min\left(\rho_k A_k,\; \text{clip}(\rho_k, 1-\epsilon, 1+\epsilon) A_k\right)\right]}_{\text{Multi-Objective Clipped PPO}}
+\]
+\[
++ \underbrace{\beta_t \cdot D_{KL}(\pi_\theta \| \pi_{\text{ref}})}_{\text{Adaptive KL}}
++ \underbrace{\lambda_{\text{pos}} \cdot \mathcal{L}_{\text{NLL}}(\text{positive samples})}_{\text{Positive NLL (已有)}}
+\]
+\[
++ \underbrace{\lambda_{\text{contra}} \cdot \mathcal{L}_{\text{contrastive}}}_{\text{推理-动作对比学习}}
+\]
+</div>
+
+<p>其中 \(w_k\) 由 Pareto 加权计算，\(\rho_k = \frac{\pi_\theta(a|s)}{\pi_{\text{old}}(a|s)}\) 为各维度的概率比。</p>
+
+<h3>3.6 代码文件变更计划</h3>
+<table>
+<tr><th>文件</th><th>变更内容</th></tr>
+<tr><td><code>finetune/rl/rewards/multi_objective.py</code></td><td><strong>新建</strong>：多维 reward 向量计算 + Pareto 前沿识别 + 样本加权</td></tr>
+<tr><td><code>finetune/rl/models/reasoning_vla/pgmo_trainer.py</code></td><td><strong>新建</strong>：PGMO-GRPO 训练器，继承 ReasoningVLAGRPOTrainer，重写 step_training</td></tr>
+<tr><td><code>finetune/rl/utils/contrastive_loss.py</code></td><td><strong>新建</strong>：对比学习 loss 实现</td></tr>
+<tr><td><code>finetune/rl/utils/adaptive_kl.py</code></td><td><strong>新建</strong>：动态 KL 调度器</td></tr>
+<tr><td><code>finetune/rl/models/reasoning_vla/trainer.py</code></td><td><strong>修改</strong>：支持多维 advantage 和 Pareto 加权</td></tr>
+</table>
+</div>
+
+<!-- ======== Section 4 ======== -->
+<h2 id="sec-value">四、预期价值量化分析</h2>
+
+<h3>4.1 定量预期提升</h3>
+
+<div class="expected-value">
+<div class="metric-box">
+  <div class="label">推理-动作一致性</div>
+  <div class="value">+25~35%</div>
+</div>
+<div class="metric-box">
+  <div class="label">CoC 推理质量</div>
+  <div class="value">+15~20%</div>
+</div>
+<div class="metric-box">
+  <div class="label">轨迹 ADE</div>
+  <div class="value">-8~12%</div>
+</div>
+<div class="metric-box">
+  <div class="label">闭合碰撞率</div>
+  <div class="value">-18~25%</div>
+</div>
+<div class="metric-box">
+  <div class="label">训练稳定性</div>
+  <div class="value">+30%</div>
+</div>
+</div>
+
+<p style="margin-top: 0.5rem; color: var(--text-dim); font-size: 0.85rem;">
+  估算依据：参考 Alpamayo-R1 论文中 RL 后训练带来的 45%/37% 提升基线，
+  在增加推理 reward 和多目标优化后，预期在原有基础上再提升。
+</p>
+
+<h3>4.2 消融实验设计（7组）</h3>
+<table>
+<tr><th>#</th><th>实验名称</th><th>关键变量</th><th>预期发现</th></tr>
+<tr><td>A</td><td>Base GRPO (baseline)</td><td>当前公开代码</td><td>原始性能基线</td></tr>
+<tr><td>B</td><td>+ Layer 1-2 (CoC quality only)</td><td>仅增加推理质量 reward</td><td>推理质量提升但轨迹未必改善</td></tr>
+<tr><td>C</td><td>+ Layer 3 (RAA consistency)</td><td>增加一致性 reward</td><td>推理-动作对齐改善 (+25%)</td></tr>
+<tr><td>D</td><td>+ Full HCC-RM (4 layers)</td><td>完整层次化 reward</td><td>所有维度协同提升</td></tr>
+<tr><td>E</td><td>+ Multi-Objective Advantage</td><td>多维 advantage 分解</td><td>训练更稳定，reward 方差降低</td></tr>
+<tr><td>F</td><td>+ Pareto Weighting</td><td>Pareto 最优样本加权</td><td>质量提升 5-8%（最优样本被强调）</td></tr>
+<tr><td>G</td><td>+ Adaptive KL + Contrastive (Full PGMO)</td><td>完整 PGMO-GRPO</td><td>最佳综合性能，收敛更快</td></tr>
+</table>
+
+<h3>4.3 学术贡献定位</h3>
+<table>
+<tr><th>维度</th><th>HCC-RM</th><th>PGMO-GRPO</th></tr>
+<tr>
+  <td><strong>问题新度</strong></td>
+  <td>首次在 VLA 的 RL 训练中系统引入推理质量层次化评估</td>
+  <td>首次在多目标 GRPO 中引入 Pareto 最优性引导和动态 KL</td>
+</tr>
+<tr>
+  <td><strong>方法新度</strong></td>
+  <td>因果一致性度量 + 层次门控是全新设计</td>
+  <td>Pareto 加权 + 对比推理-动作学习为原创</td>
+</tr>
+<tr>
+  <td><strong>实验充分度</strong></td>
+  <td>可做 4 层逐层消融 + 跨场景泛化测试</td>
+  <td>可做 4 组件逐项消融 + 训练曲线对比</td>
+</tr>
+<tr>
+  <td><strong>适用性</strong></td>
+  <td>适用于所有推理+动作的 VLA 模型</td>
+  <td>适用于所有多目标 GRPO 场景</td>
+</tr>
+</table>
+
+<!-- ======== Section 5 ======== -->
+<h2 id="sec-implementation">五、实现路径与代码修改清单</h2>
+
+<h3>5.1 总体实现路线图</h3>
+
+<div class="card">
+<pre style="background: none; border: none; padding: 0;">
+Phase 1 (第1周): HCC-RM 核心实现
+  ├── 新建 finetune/rl/rewards/coc_reward.py       — CoC质量评分
+  ├── 新建 finetune/rl/rewards/raa_reward.py        — 推理动作一致性
+  ├── 新建 finetune/rl/rewards/hcc_reward.py        — 层次化聚合
+  └── 修改 finetune/rl/rewards/aggregated_reward.py — 入口适配
+
+Phase 2 (第2周): PGMO-GRPO 核心实现
+  ├── 新建 finetune/rl/rewards/multi_objective.py   — 多维reward + Pareto
+  ├── 新建 finetune/rl/utils/contrastive_loss.py     — 对比loss
+  ├── 新建 finetune/rl/utils/adaptive_kl.py          — 动态KL
+  └── 新建 finetune/rl/models/reasoning_vla/pgmo_trainer.py — PGMO训练器
+
+Phase 3 (第3-4周): 集成与实验
+  ├── 修改 entry script 支持 HCC / PGMO 切换
+  ├── 修改 TOML config 新增参数组
+  ├── 本地验证 → 集群训练 → 消融实验
+  └── 准备论文图表与实验分析
+</pre>
+</div>
+
+<h3>5.2 TOML 配置新增参数</h3>
+
+<pre><code># 新增 [custom.alpamayo.reward] 部分
+[custom.alpamayo.reward]
+traj_l2_weight = 0.5
+comfort_weight = 0.3
+coc_quality_weight = 0.15    # 新增：CoC质量权重
+raa_weight = 0.15             # 新增：推理-动作一致性权重
+scene_threshold = 0.3         # 新增：场景理解门控阈值
+enable_hcc = true             # 新增：启用HCC-RM
+
+# 新增 [custom.alpamayo.pgmo] 部分
+[custom.alpamayo.pgmo]
+enable_pareto_weighting = true     # 新增：Pareto加权
+enable_adaptive_kl = true          # 新增：动态KL
+adaptive_kl_lambda = 2.0           # 新增：KL衰减率
+contrastive_weight = 0.05          # 新增：对比学习权重
+contrastive_temperature = 0.07     # 新增：对比温度</code></pre>
+
+<h3>5.3 论文写作建议</h3>
+
+<div class="card">
+<h4>论文标题候选</h4>
+<ul>
+  <li>"Hierarchical Causal-Consistent Reward Modeling for Reinforcement Learning of Vision-Language-Action Models"</li>
+  <li>"Pareto-Guided Multi-Objective GRPO for Aligned Reasoning and Action in Autonomous Driving"</li>
+</ul>
+
+<h4>投稿策略</h4>
+<table>
+<tr><th>会议</th><th>截稿时间(预估)</th><th>适合度</th><th>策略</th></tr>
+<tr>
+  <td>ICML 2027</td><td>2027年1月</td><td>⭐⭐⭐⭐⭐</td><td>首选：方法创新性+消融实验完整性 匹配 ICML 偏好</td>
+</tr>
+<tr>
+  <td>AAAI 2027</td><td>2026年8月</td><td>⭐⭐⭐⭐</td><td>时间更紧但可行：侧重应用价值+实验规模</td>
+</tr>
+<tr>
+  <td>NeurIPS 2026</td><td>2026年5月</td><td>⭐⭐⭐</td><td>时间极紧：可作为第二投稿目标</td>
+</tr>
+<tr>
+  <td>CoRL 2026</td><td>2026年6月</td><td>⭐⭐⭐⭐⭐</td><td>机器人+自动驾驶顶会，非常适合 VLA 主题</td>
+</tr>
+</table>
+</div>
+
+<!-- ======== Section 6 ======== -->
+<h2 id="sec-conclusion">六、总结与投稿策略</h2>
+
+<div class="card highlight">
+<h3>核心贡献三要素</h3>
+
+<ol>
+<li>
+  <strong>HCC-RM：层次化因果一致奖励模型</strong><br>
+  <span style="color: var(--text-dim)">
+    首次在端到端自动驾驶 VLA 的 RL 训练中引入四层结构化奖励体系，
+    从场景理解→因果推理→推理-动作一致性→轨迹质量，逐层把关。
+    解决现有方案中推理信号缺失导致 CoC-轨迹差距的核心问题。
+  </span>
+</li><br>
+<li>
+  <strong>PGMO-GRPO：Pareto 引导多目标 GRPO</strong><br>
+  <span style="color: var(--text-dim)">
+    将 GRPO 从单标量 advantage 扩展到多维目标空间，
+    引入 Pareto 最优性引导的样本加权、一致性感知的
+    自适应 KL 调度、以及推理-动作对比学习，
+    实现多目标联合优化和训练稳定性提升。
+  </span>
+</li><br>
+<li>
+  <strong>系统级验证 + 可复现代码</strong><br>
+  <span style="color: var(--text-dim)">
+    在 NVIDIA Cosmos-RL 框架上完整实现，提供可复现的实验 pipeline，
+    包含 7 组消融实验设计和跨场景泛化验证。
+  </span>
+</li>
+</ol>
+</div>
+
+<div class="card green" style="margin-top: 2rem;">
+<h3 style="margin-top:0">为什么能发顶级会议？</h3>
+<table>
+<tr><th>标准</th><th>满足情况</th></tr>
+<tr><td><strong>Novelty 创新性</strong></td><td>✅ HCC-RM（层次化因果一致奖励）和 PGMO-GRPO（Pareto 多目标 GRPO）均为原创方法，在 VLA+RL 领域无先例</td></tr>
+<tr><td><strong>Significance 重要性</strong></td><td>✅ 解决端到端自动驾驶中推理-动作一致性的核心 open problem，方法可泛化到所有 VLA 模型</td></tr>
+<tr><td><strong>Soundness 严谨性</strong></td><td>✅ 7 组消融实验 + 多维指标 + 开放/闭合评估 + 训练稳定性分析</td></tr>
+<tr><td><strong>Clarity 清晰度</strong></td><td>✅ 方法设计从问题分析→理论推导→工程实现→实验验证，逻辑完整</td></tr>
+<tr><td><strong>Impact 影响力</strong></td><td>✅ 桥接推理增强 RL 和多目标优化，对自动驾驶、机器人操作、具身智能均有指导意义</td></tr>
+</table>
+</div>
+
+<div style="text-align: center; margin: 2.5rem 0 1rem; color: var(--text-dim); font-size: 0.85rem;">
+  <p>Alpamayo 1.5 RL Innovation Plan · Generated 2026-05-14</p>
+  <p>相关代码修改见 <code>finetune/rl/</code> 目录 · 论文参考 <a href="https://arxiv.org/abs/2511.00088">arXiv:2511.00088</a></p>
+</div>
+
+</body>
+</html>

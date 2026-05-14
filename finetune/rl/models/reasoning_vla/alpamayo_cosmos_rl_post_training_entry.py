@@ -19,6 +19,13 @@ Sets up env vars and registers the ReasoningVLA model with vLLM before
 assembling a ``ModelSpec`` with all Cosmos-RL components — model wrapper,
 weight mapper, data packer, and reward function — and launching GRPO
 training on the PAI dataset.
+
+Supports two training modes (auto-detected from TOML):
+  1. **Standard GRPO** (default): ReasoningVLAGRPOTrainer with legacy/aggregated reward.
+  2. **PGMO-GRPO**: PGMOTrainer with HCC-RM reward, Pareto weighting,
+     adaptive KL, and contrastive learning.
+
+PGMO-GRPO is enabled when ``[custom.alpamayo.pgmo].enable`` is true in TOML.
 """
 
 # ruff: noqa: E402
@@ -60,9 +67,30 @@ from rl.models.reasoning_vla.rollout import ReasoningVlaVllmRollout  # noqa: F40
 from rl.models.reasoning_vla.trainer import ReasoningVLAGRPOTrainer  # noqa: F401 (Cosmos registry)
 from rl.models.reasoning_vla.weight_mapper import ReasoningVLAWeightMapper
 
+# PGMO-GRPO: register the Pareto-guided multi-objective trainer
+# Import triggers Cosmos trainer registration via decorator
+try:
+    from rl.models.reasoning_vla.pgmo_trainer import PGMOTrainer  # noqa: F401
+except ImportError as e:
+    logger.debug(f"PGMO trainer not available (optional): {e}")
+
+
+def _is_pgmo_enabled(config) -> bool:
+    """Check whether PGMO-GRPO mode is enabled in TOML config."""
+    try:
+        pgmo = getattr(config, "custom")["alpamayo"].get("pgmo", {})
+        return bool(pgmo.get("enable", False))
+    except (TypeError, KeyError, AttributeError):
+        return False
+
 
 def _reasoning_vla_reward_fn(to_be_evaluated, reference=None, *args, config=None, **kwargs):
-    """Compute aggregated reward for a single ReasoningVLA rollout."""
+    """Compute aggregated reward for a single ReasoningVLA rollout.
+
+    Automatically uses HCC-RM when [custom.alpamayo.reward] contains
+    coc_quality_weight and raa_weight keys, otherwise falls back to
+    legacy trajectory-only reward.
+    """
     import rl.state as alp_state
     from rl.rewards.aggregated_reward import compute_reward
 
@@ -79,6 +107,13 @@ def _reasoning_vla_reward_fn(to_be_evaluated, reference=None, *args, config=None
     )
 
 
+# Build ModelSpec with PGMO support
+# The trainer_type is set to "reasoning_vla_grpo" by default.
+# Set COSMOS_TRAINER_TYPE=reasoning_vla_pgmo_grpo to use PGMO.
+_trainer_type = os.environ.get(
+    "COSMOS_TRAINER_TYPE", "reasoning_vla_grpo"
+)
+
 REASONING_VLA_SPEC = ModelSpec(
     cosmos_wrapper=RVLACosmos,
     weight_mapper=ReasoningVLAWeightMapper,
@@ -92,6 +127,7 @@ REASONING_VLA_SPEC = ModelSpec(
         "data.train.dataset.features_metadata=features.csv",
         "data.train.dataset.use_default_keyframe=True",
     ],
+    trainer_type=_trainer_type,
 )
 
 if __name__ == "__main__":

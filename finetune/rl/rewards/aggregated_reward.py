@@ -14,7 +14,16 @@
 # limitations under the License.
 
 
-"""Aggregated reward computation for Alpamayo Cosmos-RL training."""
+"""Aggregated reward computation for Alpamayo Cosmos-RL training.
+
+Supports two reward modes:
+  1. **HCC-RM** (default): Hierarchical Causal-Consistent Reward Model
+     — 4-layer hierarchical reward with CoC quality, RAA, and trajectory scoring.
+  2. **Legacy**: Original trajectory-only reward (ADE + comfort).
+
+Mode is auto-detected from the TOML config: if ``coc_quality_weight`` and
+``raa_weight`` are present, HCC-RM is used. Otherwise falls back to legacy.
+"""
 
 from __future__ import annotations
 
@@ -25,9 +34,17 @@ _REQUIRED_REWARD_KEYS: list[str] = [
     "comfort_weight",
 ]
 
+_HCC_REWARD_KEYS: list[str] = [
+    "coc_quality_weight",
+    "raa_weight",
+]
+
 
 def _get_reward_cfg(config: object | None) -> dict[str, float]:
-    """Extract reward parameters from Cosmos TOML [custom.alpamayo.reward]."""
+    """Extract reward parameters from Cosmos TOML [custom.alpamayo.reward].
+
+    Auto-detects HCC-RM vs legacy mode based on present keys.
+    """
     try:
         reward_cfg = getattr(config, "custom")["alpamayo"]["reward"]
     except (TypeError, KeyError, AttributeError) as e:
@@ -43,6 +60,28 @@ def _get_reward_cfg(config: object | None) -> dict[str, float]:
     return {k: float(reward_cfg[k]) for k in _REQUIRED_REWARD_KEYS}
 
 
+def _is_hcc_enabled(config: object | None) -> bool:
+    """Check whether HCC-RM mode is enabled via TOML config.
+
+    HCC-RM is enabled when both ``coc_quality_weight`` and ``raa_weight``
+    are present in the reward config AND ``enable_hcc`` is not explicitly
+    set to false.
+    """
+    try:
+        reward_cfg = getattr(config, "custom")["alpamayo"]["reward"]
+    except (TypeError, KeyError, AttributeError):
+        return False
+
+    # Check for explicit disable flag
+    explicit_enable = reward_cfg.get("enable_hcc", None)
+    if explicit_enable is not None:
+        return bool(explicit_enable)
+
+    # Auto-detect: HCC keys present → enabled
+    has_hcc_keys = all(k in reward_cfg for k in _HCC_REWARD_KEYS)
+    return has_hcc_keys
+
+
 def compute_reward(
     to_be_evaluated: str,
     reference: dict[str, Any],
@@ -52,7 +91,23 @@ def compute_reward(
     config: object | None = None,
     model_config: Any,
 ) -> tuple[float, dict[str, float]]:
-    """Compute the aggregated reward for a single rollout against reference data."""
+    """Compute the aggregated reward for a single rollout against reference data.
+
+    Automatically selects HCC-RM or legacy reward based on TOML configuration.
+    """
+    if _is_hcc_enabled(config):
+        from rl.rewards.hcc_reward import compute_hcc_reward
+
+        return compute_hcc_reward(
+            to_be_evaluated,
+            reference,
+            tokenizer=tokenizer,
+            traj_tokenizer=traj_tokenizer,
+            config=config,
+            model_config=model_config,
+        )
+
+    # ---- Legacy reward path (trajectory-only ADE + comfort) ----
     from rl.rewards.comfort_reward import compute_comfort
     from cosmos_rl.utils.logging import logger  # pyright: ignore[reportMissingImports]
 
@@ -88,11 +143,12 @@ def compute_reward(
         )
     else:
         final_reward = -1.0
-    logger.debug(f"[compute_reward] Final reward: {final_reward}")
+    logger.debug(f"[compute_reward] Final reward (legacy): {final_reward}")
     reward_dict: dict[str, float] = {
         "traj_L2": float(l2_dist),
         "comfort_reward": float(comfort_score),
         "reward": float(final_reward),
+        "reward_type": "legacy",
     }
 
     return reward_dict["reward"], reward_dict
