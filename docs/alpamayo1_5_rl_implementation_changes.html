@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alpamayo 1.5 RL 改进实现详情 — 完整代码变更清单</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #c9d1d9; --text-dim: #8b949e; --accent: #58a6ff;
+    --accent2: #3fb950; --accent3: #d2a8ff; --warn: #d29922;
+    --danger: #f85149; --code-bg: #1c2128;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.7;
+    max-width: 1200px; margin: 0 auto; padding: 2rem 1.5rem;
+  }
+  h1 { font-size: 2rem; color: #fff; text-align: center; margin-bottom: 0.3rem;
+       background: linear-gradient(135deg, var(--accent), var(--accent3));
+       -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  h2 { font-size: 1.5rem; color: var(--accent); margin: 2.5rem 0 1rem;
+       padding-bottom: 0.4rem; border-bottom: 2px solid var(--border); }
+  h3 { font-size: 1.2rem; color: var(--accent2); margin: 1.5rem 0 0.6rem; }
+  h4 { font-size: 1.05rem; color: var(--accent3); margin: 1rem 0 0.5rem; }
+  .meta { text-align: center; color: var(--text-dim); font-size: 0.9rem; margin-bottom: 2rem; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 1.5rem; margin: 1rem 0;
+  }
+  .card.highlight { border-color: var(--accent); }
+  .card.green { border-color: var(--accent2); }
+  .card.orange { border-color: var(--warn); }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 1rem; overflow-x: auto; font-size: 0.82rem; margin: 0.8rem 0;
+    font-family: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+  }
+  code { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.9em;
+         background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { padding: 0.5rem 0.7rem; border: 1px solid var(--border); text-align: left; }
+  th { background: var(--code-bg); color: var(--accent); font-weight: 600; }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  .tag {
+    display: inline-block; padding: 0.12em 0.5em; border-radius: 10px;
+    font-size: 0.75rem; font-weight: 600; margin-right: 0.3rem;
+  }
+  .tag.new { background: rgba(63,185,80,0.15); color: var(--accent2); }
+  .tag.mod { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .tag.del { background: rgba(248,81,73,0.15); color: var(--danger); }
+  .diff-add { color: var(--accent2); }
+  .diff-del { color: var(--danger); text-decoration: line-through; }
+  .file-path { font-family: monospace; font-size: 0.85rem; color: var(--accent); }
+  .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin: 1rem 0; }
+  @media (max-width: 700px) { .stat-grid { grid-template-columns: 1fr 1fr; } }
+  .stat-box {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 1rem; text-align: center;
+  }
+  .stat-box .num { font-size: 2rem; font-weight: 700; color: var(--accent); }
+  .stat-box .lbl { font-size: 0.8rem; color: var(--text-dim); margin-top: 0.3rem; }
+  .toc { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+         padding: 1.2rem 1.5rem; margin: 1.5rem 0; }
+  .toc ul { list-style: none; padding-left: 0; }
+  .toc ul li { margin-bottom: 0.25rem; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .commit-hash { font-family: monospace; font-size: 0.8rem; color: var(--warn); }
+</style>
+</head>
+<body>
+
+<h1>Alpamayo 1.5 RL 改进实现详情</h1>
+<div class="meta">
+  <strong>完整代码变更清单 · 逐文件改动说明</strong><br>
+  GitHub: <a href="https://github.com/ikutasama/alpamayo1.5" target="_blank">ikutasama/alpamayo1.5</a> ·
+  生成日期: 2026-05-14
+</div>
+
+<!-- ======== STATS ======== -->
+<div class="stat-grid">
+  <div class="stat-box">
+    <div class="num">14</div><div class="lbl">新增文件</div>
+  </div>
+  <div class="stat-box">
+    <div class="num">4</div><div class="lbl">修改文件</div>
+  </div>
+  <div class="stat-box">
+    <div class="num">3,888</div><div class="lbl">新增代码行</div>
+  </div>
+  <div class="stat-box">
+    <div class="num">3</div><div class="lbl">创新点</div>
+  </div>
+</div>
+
+<!-- ======== TOC ======== -->
+<div class="toc">
+<strong style="color: var(--accent)">📑 目录</strong>
+<ul>
+  <li><a href="#sec-overview">一、总体变更概览</a></li>
+  <li><a href="#sec-branches">二、Git 分支与 Commits</a></li>
+  <li><a href="#sec-innovation1">三、创新点一：HCC-RM（层次化因果一致奖励模型）</a></li>
+  <li><a href="#sec-innovation2">四、创新点二：PGMO-GRPO（Pareto引导多目标GRPO）</a></li>
+  <li><a href="#sec-innovation3">五、创新点三：GSPO（组序列策略优化）</a></li>
+  <li><a href="#sec-config">六、TOML 配置变更详情</a></li>
+  <li><a href="#sec-entry">七、入口脚本修改详情</a></li>
+  <li><a href="#sec-filemap">八、完整文件清单</a></li>
+</ul>
+</div>
+
+<!-- ======== 1. OVERVIEW ======== -->
+<h2 id="sec-overview">一、总体变更概览</h2>
+
+<div class="card highlight">
+<h3>三创新点架构</h3>
+<pre style="background: none; border: none; padding: 0;">
+┌──────────────────────────────────────────────────────────────────┐
+│                     Alpamayo 1.5 RL 改进架构                       │
+│                                                                   │
+│  Innovation 1: HCC-RM          Innovation 2: PGMO-GRPO            │
+│  ┌─────────────────────┐      ┌─────────────────────────────┐     │
+│  │ 四层层次化奖励:      │      │ 多目标 GRPO 增强:           │     │
+│  │  L1→场景理解(门控)   │      │  ├ Pareto最优样本加权       │     │
+│  │  L2→因果推理质量     │      │  ├ 自适应KL调度             │     │
+│  │  L3→推理-动作一致性  │      │  ├ 对比推理-动作学习(CRAL)  │     │
+│  │  L4→轨迹质量         │      │  └ 多维advantage分解        │     │
+│  └─────────────────────┘      └─────────────────────────────┘     │
+│              │                            │                        │
+│              └──────────┬─────────────────┘                        │
+│                         ▼                                          │
+│  Innovation 3: GSPO (序列级优化替代token级)                         │
+│  ┌──────────────────────────────────────────────────────────┐     │
+│  │  序列级重要性比率 w_i = exp(Σlogπ_θ - Σlogπ_old)         │     │
+│  │  序列级裁剪 clip(w_i, 1-ε, 1+ε)                         │     │
+│  │  仅未裁剪样本归一化                                      │     │
+│  └──────────────────────────────────────────────────────────┘     │
+│                         │                                          │
+│                         ▼                                          │
+│              ┌──────────────────┐                                  │
+│              │  GSPOTrainer     │ ← 训练入口                       │
+│              │  = GSPO Loss     │                                  │
+│              │  + Pareto加权    │                                  │
+│              │  + 自适应KL      │                                  │
+│              │  + 对比学习CRAL  │                                  │
+│              └──────────────────┘                                  │
+└──────────────────────────────────────────────────────────────────┘
+</pre>
+</div>
+
+<!-- ======== 2. BRANCHES ======== -->
+<h2 id="sec-branches">二、Git 分支与 Commits</h2>
+
+<table>
+<tr><th>分支</th><th>Commit</th><th>内容</th><th>文件数</th><th>代码行</th></tr>
+<tr>
+  <td><code>main</code></td>
+  <td class="commit-hash">a249526</td>
+  <td>HCC-RM + PGMO-GRPO 创新点一、二</td>
+  <td>12 files</td>
+  <td>+2,801</td>
+</tr>
+<tr>
+  <td><code>feat/gspo</code></td>
+  <td class="commit-hash">5f66f15</td>
+  <td>GSPO 创新点三（基于 main）</td>
+  <td>5 files</td>
+  <td>+1,087</td>
+</tr>
+</table>
+
+<div class="card">
+<p><strong>使用方式：</strong></p>
+<pre><code># 使用 PGMO-GRPO（main 分支）
+export COSMOS_TRAINER_TYPE=reasoning_vla_pgmo_grpo
+bash finetune/rl/run_rl_local_test_signal_node.sh
+
+# 使用 GSPO（feat/gspo 分支）
+export COSMOS_TRAINER_TYPE=reasoning_vla_gspo_grpo
+bash finetune/rl/run_rl_local_test_signal_node.sh
+
+# 使用原始 GRPO（默认）
+export COSMOS_TRAINER_TYPE=reasoning_vla_grpo
+bash finetune/rl/run_rl_local_test_signal_node.sh</code></pre>
+</div>
+
+<!-- ======== 3. INNOVATION 1: HCC-RM ======== -->
+<h2 id="sec-innovation1">三、创新点一：HCC-RM 详细变更</h2>
+
+<div class="card green">
+<h3>3.1 新增文件概览</h3>
+<table>
+<tr><th>文件</th><th>行数</th><th>核心功能</th></tr>
+<tr>
+  <td class="file-path">finetune/rl/rewards/coc_reward.py</td>
+  <td>291行</td>
+  <td>CoC推理文本质量评分器（4维度）</td>
+</tr>
+<tr>
+  <td class="file-path">finetune/rl/rewards/raa_reward.py</td>
+  <td>300行</td>
+  <td>推理-动作一致性（RAA）计算</td>
+</tr>
+<tr>
+  <td class="file-path">finetune/rl/rewards/hcc_reward.py</td>
+  <td>257行</td>
+  <td>四层层次化奖励聚合入口</td>
+</tr>
+</table>
+</div>
+
+<h3>3.2 <span class="file-path">coc_reward.py</span> <span class="tag new">NEW</span></h3>
+
+<div class="card">
+<h4>功能：CoC推理文本质量评分</h4>
+<p>从 rollout completion 中提取 Chain-of-Causation 推理文本（<code>&lt;|cot_end|&gt;</code>之前的部分），在四个维度上评分：</p>
+<table>
+<tr><th>维度</th><th>函数</th><th>评分方法</th><th>权重</th></tr>
+<tr>
+  <td>事实准确性</td>
+  <td><code>score_factual_accuracy()</code></td>
+  <td>4类场景实体正则匹配（车辆/道路/天气/交通）</td>
+  <td>0.25</td>
+</tr>
+<tr>
+  <td>因果连贯性</td>
+  <td><code>score_causal_coherence()</code></td>
+  <td>因果连接词 + 决策关键词 + 结构检查（观察→行动）</td>
+  <td>0.30</td>
+</tr>
+<tr>
+  <td>安全意识</td>
+  <td><code>score_safety_awareness()</code></td>
+  <td>安全关键词匹配（hazard/risk/collision/cautious等）</td>
+  <td>0.25</td>
+</tr>
+<tr>
+  <td>完整性</td>
+  <td><code>score_completeness()</code></td>
+  <td>6个驾驶维度覆盖检查（危险识别/意图预测/动作论证等）</td>
+  <td>0.20</td>
+</tr>
+</table>
+
+<h4>关键数据结构</h4>
+<pre><code># 场景实体模式 — 4类共10+正则模式
+SCENE_ENTITY_PATTERNS = {
+    "vehicle": ["vehicle|car|truck|bus|...", "ego vehicle|leading vehicle|..."],
+    "road_structure": ["lane|intersection|crosswalk|...", "highway|ramp|..."],
+    "weather": ["rain|snow|fog|sun|glare|night|wet|icy|..."],
+    "traffic_condition": ["congestion|heavy traffic|light traffic|..."],
+}
+
+# 因果连接词 — 检查推理链内的逻辑连接
+CAUSAL_CONNECTORS = ["because|since|due to|as a result|therefore|thus|..."]
+
+# 6个驾驶维度 — 用于完整性评分
+DRIVING_DIMENSIONS = {
+    "hazard_identification", "intent_prediction",
+    "action_justification", "safety_check",
+    "spatial_reasoning", "temporal_reasoning",
+}</code></pre>
+
+<h4>CoC文本提取逻辑</h4>
+<pre><code>def extract_coc_text(to_be_evaluated: str) -> str:
+    """从rollout completion提取CoC文本。"""
+    if "&lt;|cot_end|&gt;" in to_be_evaluated:
+        return to_be_evaluated.split("&lt;|cot_end|&gt;")[0].strip()
+    if "&lt;|traj_future_start|&gt;" in to_be_evaluated:
+        return to_be_evaluated.split("&lt;|traj_future_start|&gt;")[0].strip()
+    return to_be_evaluated.strip()</code></pre>
+</div>
+
+<h3>3.3 <span class="file-path">raa_reward.py</span> <span class="tag new">NEW</span></h3>
+
+<div class="card">
+<h4>功能：推理-动作一致性（RAA）计算</h4>
+<p>这是弥合CoC-轨迹差距的核心组件。从CoC文本中提取行为意图，从轨迹中推断实际行为，计算两者对齐度。</p>
+
+<h4>三步流水线</h4>
+<pre><code># Step 1: 从CoC文本提取行为约束
+constraints = extract_behavioral_constraints(coc_text)
+# → {"decelerate": 0.85, "turn_right": 0.70, "maintain": 0.3, ...}
+
+# Step 2: 从预测轨迹推断实际行为
+inferred = infer_trajectory_behavior(predicted_xyz, predicted_rot)
+# → 通过速度变化推断加减速，方向变化推断转向，横向位移推断变道
+
+# Step 3: 计算对齐度
+# 对于意图行为（intended > 0.3）：alignment = 1 - |intended - actual|
+# 对于非意图行为+实际高：penalty = 1 - actual</code></pre>
+
+<h4>7种行为约束类型</h4>
+<table>
+<tr><th>行为</th><th>CoC检测方法</th><th>轨迹推断方法</th></tr>
+<tr><td>减速</td><td>正则匹配 slow down/decelerate/brake/stop/yield</td><td>速度变化率 sigmoid(-Δv×10)</td></tr>
+<tr><td>加速</td><td>正则匹配 speed up/accelerate/proceed/go</td><td>速度变化率 sigmoid(Δv×10)</td></tr>
+<tr><td>左转</td><td>正则匹配 turn left/left turn/steer left</td><td>累积方向变化 sigmoid(Δθ×5)</td></tr>
+<tr><td>右转</td><td>正则匹配 turn right/right turn/steer right</td><td>累积方向变化 sigmoid(-Δθ×5)</td></tr>
+<tr><td>变道</td><td>正则匹配 change lane/merge/move to</td><td>横向位移 |Δy| / 3.5</td></tr>
+<tr><td>保持</td><td>正则匹配 maintain/keep/stay/follow/cruise</td><td>1 - min(σ(v)/2, 1)</td></tr>
+<tr><td>保持距离</td><td>正则匹配 keep distance/safe distance</td><td>maintain × (1-max(decel,accel))</td></tr>
+</table>
+</div>
+
+<h3>3.4 <span class="file-path">hcc_reward.py</span> <span class="tag new">NEW</span></h3>
+
+<div class="card">
+<h4>功能：四层层次化奖励聚合</h4>
+<p>HCC-RM的主入口，按四层结构聚合所有奖励信号：</p>
+
+<h4>层次化公式</h4>
+<pre><code>if s1 (场景理解) < τ_scene:
+    R = -1.0  # 门控失败
+else:
+    # 各层归一化到 [-1, 1]
+    s2_norm = 2 * s2_coc - 1      # CoC质量 [0,1]→[-1,1]
+    s3_norm = 2 * s3_raa - 1      # RAA对齐 [0,1]→[-1,1]
+    s4_norm = w·traj + cw·comfort  # 轨迹质量 [-1,1]
+
+    R = α·s2_norm + β·s3_norm + γ·s4_norm
+    R *= s1  # 场景理解全局乘数
+    R = clamp(R, -1, 1)</code></pre>
+
+<h4>聚合权重分配</h4>
+<p>从TOML读取 <code>coc_quality_weight</code> 和 <code>raa_weight</code>，剩余权重自动分配给轨迹质量。</p>
+
+<h4>返回的reward_dict（用于日志和多目标分解）</h4>
+<pre><code>reward_dict = {
+    "scene_understanding": float,    # s1
+    "coc_quality": float,            # 聚合CoC质量
+    "coc_factual": float,            # 事实准确性
+    "coc_coherence": float,          # 因果连贯性
+    "coc_safety": float,             # 安全意识
+    "coc_completeness": float,       # 完整性
+    "raa_score": float,              # RAA对齐度
+    "raa_decelerate": float,         # 各约束对齐度...
+    "traj_L2": float,                # ADE距离
+    "comfort_reward": float,         # 舒适度
+    "reward": float,                 # 最终奖励
+    "reward_type": "hcc",           # 或 "hcc_gated_scene"
+}</code></pre>
+</div>
+
+<h3>3.5 <span class="file-path">aggregated_reward.py</span> <span class="tag mod">MODIFIED</span></h3>
+
+<div class="card">
+<h4>改动：新增HCC-RM自动检测与路由</h4>
+<p>原始版本仅支持轨迹质量reward。修改后：</p>
+<ul>
+  <li>新增 <code>_is_hcc_enabled(config)</code> — 检测TOML中是否有 <code>coc_quality_weight</code> + <code>raa_weight</code></li>
+  <li>新增 <code>_HCC_REWARD_KEYS</code> 常量列表</li>
+  <li><code>compute_reward()</code> 增加分支：如果HCC启用 → 调用 <code>compute_hcc_reward()</code>，否则走原有轨迹reward逻辑</li>
+  <li><strong>完全向后兼容</strong>：不配置HCC键时行为与原来完全一致</li>
+</ul>
+</div>
+
+<!-- ======== 4. INNOVATION 2: PGMO-GRPO ======== -->
+<h2 id="sec-innovation2">四、创新点二：PGMO-GRPO 详细变更</h2>
+
+<div class="card orange">
+<h3>4.1 新增文件概览</h3>
+<table>
+<tr><th>文件</th><th>行数</th><th>核心功能</th></tr>
+<tr>
+  <td class="file-path">finetune/rl/rewards/multi_objective.py</td>
+  <td>208行</td>
+  <td>多维reward分解 + Pareto前沿识别 + Pareto加权</td>
+</tr>
+<tr>
+  <td class="file-path">finetune/rl/utils/adaptive_kl.py</td>
+  <td>156行</td>
+  <td>一致性引导的自适应KL调度器</td>
+</tr>
+<tr>
+  <td class="file-path">finetune/rl/utils/contrastive_loss.py</td>
+  <td>168行</td>
+  <td>对比推理-动作学习（CRAL）</td>
+</tr>
+<tr>
+  <td class="file-path">finetune/rl/models/reasoning_vla/pgmo_trainer.py</td>
+  <td>637行</td>
+  <td>PGMO-GRPO训练器（继承GRPOTrainer）</td>
+</tr>
+</table>
+</div>
+
+<h3>4.2 <span class="file-path">multi_objective.py</span> <span class="tag new">NEW</span></h3>
+
+<div class="card">
+<h4>功能：多目标分解与Pareto优化</h4>
+
+<h4>四个核心函数</h4>
+<table>
+<tr><th>函数</th><th>输入</th><th>输出</th><th>说明</th></tr>
+<tr>
+  <td><code>decompose_reward_dict()</code></td>
+  <td>reward_info dict</td>
+  <td>[M] tensor（4维）</td>
+  <td>从reward_dict提取coc_quality, raa_score, traj_L2, comfort_reward；traj_L2取反使最大化一致</td>
+</tr>
+<tr>
+  <td><code>identify_pareto_optimal()</code></td>
+  <td>objectives [N,M]</td>
+  <td>bool [N]</td>
+  <td>O(N²) 支配检测：样本j支配i当且仅当所有维度≥且至少一个维度></td>
+</tr>
+<tr>
+  <td><code>compute_pareto_weights()</code></td>
+  <td>objectives [N,M]</td>
+  <td>weights [N]</td>
+  <td>Pareto样本权重=base_weight(1.5)×距离加权；非Pareto=1.0</td>
+</tr>
+<tr>
+  <td><code>compute_weighted_scalar_advantage()</code></td>
+  <td>advantages [N,M], weights [M], pareto_w [N]</td>
+  <td>scalar_adv [N]</td>
+  <td>加权求和 + Pareto乘数</td>
+</tr>
+</table>
+
+<h4>Pareto距离加权增强</h4>
+<pre><code># 理想点 = 各维度最大值
+ideal_point = objectives.max(dim=0)
+
+# Pareto样本中离理想点近的 → 更高权重（最高可达 2×base_weight）
+distances = ||(ideal_point - objectives) / range||
+pareto_dist_weights = 1 / (distances + ε)
+
+weights[pareto] = base_weight * (1 + (1 - normalized_distance))</code></pre>
+</div>
+
+<h3>4.3 <span class="file-path">adaptive_kl.py</span> <span class="tag new">NEW</span></h3>
+
+<div class="card">
+<h4>功能：AdaptiveKLScheduler 类</h4>
+
+<h4>核心公式</h4>
+<pre><code>β_t = β_base · exp(-λ · (s̄_align,t - 0.5))</code></pre>
+<ul>
+  <li><strong>RAA高 → β低 → 鼓励探索</strong>（策略值得信任时放宽KL约束）</li>
+  <li><strong>RAA低 → β高 → 保守更新</strong>（推理-动作不一致时加强SFT锚定）</li>
+</ul>
+
+<h4>关键参数</h4>
+<table>
+<tr><th>参数</th><th>默认值</th><th>说明</th></tr>
+<tr><td>base_beta</td><td>0.04</td><td>基线KL系数（RAA≈0.5时的值）</td></tr>
+<tr><td>lambda_decay</td><td>2.0</td><td>指数衰减率，越大越敏感</td></tr>
+<tr><td>min_beta / max_beta</td><td>0.001 / 0.2</td><td>β 取值范围</td></tr>
+<tr><td>window_size</td><td>100</td><td>RAA历史窗口</td></tr>
+<tr><td>warmup_steps</td><td>50</td><td>前50步使用固定base_beta</td></tr>
+<tr><td>smoothing</td><td>0.9</td><td>EMA平滑系数</td></tr>
+</table>
+
+<h4>RAA信号处理</h4>
+<pre><code># EMA平滑
+ema_raa = 0.9 * ema_raa + 0.1 * raa_score
+
+# 窗口平均（最近50步）
+window_avg = mean(raa_history[-50:])
+
+# 混合信号
+smoothed_raa = 0.5 * ema_raa + 0.5 * window_avg</code></pre>
+</div>
+
+<h3>4.4 <span class="file-path">contrastive_loss.py</span> <span class="tag new">NEW</span></h3>
+
+<div class="card">
+<h4>功能：对比推理-动作学习（CRAL）</h4>
+<ul>
+  <li><strong>compute_contrastive_loss()</strong> — 完整版：使用CoC质量+RAA组合分数划分正负样本</li>
+  <li><strong>compute_contrastive_loss_simple()</strong> — 简化版：按reward排名划分top 50% vs bottom 50%（GSPOTrainer使用此版本）</li>
+</ul>
+
+<h4>核心机制</h4>
+<pre><code># 取最后一层hidden states的均值池化
+pooled = hidden_states.mean(dim=1)  # [B, D]
+
+# L2归一化
+pooled = F.normalize(pooled, p=2)
+
+# InfoNCE: 正样本对互相靠近，远离负样本
+# 按reward排名：top 50% = 正样本, bottom 50% = 负样本
+L_contrastive = -log(Σexp(sim_pos/τ) / (Σexp(sim_pos/τ) + Σexp(sim_neg/τ)))</code></pre>
+
+<p>这种对比损失鼓励模型学到：<strong>好的推理应该对应好的轨迹，两者在隐空间中编码为相似表示</strong>。</p>
+</div>
+
+<h3>4.5 <span class="file-path">pgmo_trainer.py</span> <span class="tag new">NEW</span></h3>
+
+<div class="card">
+<h4>功能：PGMOTrainer 类</h4>
+<p>注册为 <code>reasoning_vla_pgmo_grpo</code>，继承自 <code>AlpamayoGRPOTrainer</code>（通过 <code>ReasoningVLAGRPOTrainer</code>）。</p>
+
+<h4>核心方法 <code>step_training()</code> 的改进点</h4>
+<ol>
+  <li><strong>多目标advantage分解</strong>：从reward_info提取4维objective → 独立Z-score归一化 → Pareto加权 → 合成标量advantage</li>
+  <li><strong>自适应KL</strong>：每步根据RAA均值更新 <code>kl_beta</code></li>
+  <li><strong>对比学习</strong>：在GRPO loss基础上增加 <code>contrastive_loss</code></li>
+  <li><strong>GSPO-ready监控</strong>：跟踪sequence-level ratio统计（为GSPO扩展预留）</li>
+</ol>
+
+<h4>与原始trainer的差异</h4>
+<table>
+<tr><th>组件</th><th>原始 trainer.py</th><th>pgmo_trainer.py</th></tr>
+<tr><td>advantage</td><td>直接使用 rollout.advantage</td><td>4维分解 → Pareto加权 → 合成标量</td></tr>
+<tr><td>KL系数</td><td>固定 kl_beta</td><td>AdaptiveKLScheduler 动态调整</td></tr>
+<tr><td>额外loss</td><td>无</td><td>+ contrastive_loss</td></tr>
+<tr><td>日志</td><td>基础指标</td><td>+ Pareto占比 + RAA均值 + KL状态 + 对比loss</td></tr>
+</table>
+</div>
+
+<!-- ======== 5. INNOVATION 3: GSPO ======== -->
+<h2 id="sec-innovation3">五、创新点三：GSPO 详细变更</h2>
+
+<div class="card orange">
+<h3>5.1 新增文件概览</h3>
+<table>
+<tr><th>文件</th><th>行数</th><th>核心功能</th></tr>
+<tr>
+  <td class="file-path">finetune/rl/utils/gspo_loss.py</td>
+  <td>214行</td>
+  <td>序列级重要性比率计算 + 裁剪 + 归一化</td>
+</tr>
+<tr>
+  <td class="file-path">finetune/rl/models/reasoning_vla/gspo_trainer.py</td>
+  <td>670行</td>
+  <td>GSPOTrainer（融合PGMO增强）</td>
+</tr>
+</table>
+</div>
+
+<h3>5.2 <span class="file-path">gspo_loss.py</span> <span class="tag new">NEW</span></h3>
+
+<div class="card">
+<h4>功能：GSPO序列级损失计算</h4>
+
+<h4>7步计算流程</h4>
+<pre><code># Step 1: 聚合每token log-prob到序列级
+for each sequence i in batch B:
+    seq_current_logps[i] = sum(current_per_token_logps[start:end])
+    seq_old_logps[i] = sum(old_per_token_logps[start:end])
+
+# Step 2: 序列级重要性比率
+log_ratio = seq_current_logps - seq_old_logps
+ratio = exp(log_ratio)  # w_i
+
+# Step 3: 序列级裁剪（关键差异！GRPO是per-token clip）
+ratio_clipped = clamp(ratio, 1-ε_low, 1+ε_high)
+
+# Step 4: 序列级损失
+loss_unclipped = -ratio * advantage
+loss_clipped = -ratio_clipped * advantage
+gspo_per_seq = max(loss_unclipped, loss_clipped) if A>0
+             = min(loss_unclipped, loss_clipped) if A≤0
+
+# Step 5: 仅未裁剪样本归一化（关键差异！GRPO用所有token）
+is_unclipped = (ratio in [1-ε, 1+ε])
+gspo_loss = sum(gspo_per_seq) / count(is_unclipped)
+
+# Step 6: KL惩罚（序列级）
+kl_loss = β * mean(Σ_t KL(π_θ||π_ref) per sequence)
+
+# Step 7: 分布式all-reduce
+</code></pre>
+
+<h4>两个导出函数</h4>
+<table>
+<tr><th>函数</th><th>用途</th></tr>
+<tr><td><code>compute_gspo_loss()</code></td><td>训练时的主loss计算，返回 (total_loss, per_token_loss, kl_loss)</td></tr>
+<tr><td><code>compute_gspo_sequence_ratios()</code></td><td>监控用，返回 (ratios, log_ratios) 用于TensorBoard日志</td></tr>
+</table>
+</div>
+
+<h3>5.3 <span class="file-path">gspo_trainer.py</span> <span class="tag new">NEW</span></h3>
+
+<div class="card">
+<h4>功能：GSPOTrainer 类</h4>
+<p>注册为 <code>reasoning_vla_gspo_grpo</code>，继承自 <code>AlpamayoGRPOTrainer</code>。</p>
+
+<h4>核心方法 <code>step_training()</code></h4>
+<pre><code># 融合架构
+├── _init_gspo()               # 懒初始化GSPO+PGMO组件
+│   ├── 读取 [custom.alpamayo.pgmo] 配置
+│   ├── 按需创建 AdaptiveKLScheduler
+│   └── 应用gspo_epsilon_low/high覆盖
+│
+├── 多目标advantage（来自PGMO）
+│   ├── decompose_reward_dict()  → 4维objectives
+│   ├── compute_pareto_weights() → Pareto加权
+│   └── compute_weighted_scalar_advantage() → 标量advantage
+│
+├── 训练循环
+│   ├── compute_gspo_loss() ← GSPO序列级loss（替代GRPO token级loss）
+│   ├── compute_contrastive_loss_simple() ← 对比学习
+│   └── AdaptiveKLScheduler.update() ← 动态KL
+│
+└── 日志
+    ├── train/gspo_ratio_mean      # 序列比率均值
+    ├── train/gspo_ratio_std       # 序列比率标准差
+    ├── train/gspo_n_unclipped     # 未裁剪样本数
+    ├── train/contrastive_loss     # 对比loss
+    └── train/adaptive_kl_*        # KL调度器状态</code></pre>
+
+<h4>与PGMOTrainer的关键差异</h4>
+<table>
+<tr><th>维度</th><th>PGMOTrainer</th><th>GSPOTrainer</th></tr>
+<tr><td>Loss函数</td><td>GRPO token级 <code>compute_loss()</code></td><td>GSPO序列级 <code>compute_gspo_loss()</code></td></tr>
+<tr><td>比率裁剪</td><td>Per-token</td><td>Per-sequence</td></tr>
+<tr><td>归一化</td><td>所有token平均</td><td>仅未裁剪样本</td></tr>
+<tr><td>监控指标</td><td>基础loss/reward</td><td>+ 序列比率统计 + 未裁剪占比</td></tr>
+<tr><td>PGMO增强</td><td>✅ Pareto + KL + CRAL</td><td>✅ Pareto + KL + CRAL（继承PGMO）</td></tr>
+</table>
+</div>
+
+<!-- ======== 6. CONFIG ======== -->
+<h2 id="sec-config">六、TOML 配置变更详情</h2>
+
+<div class="card highlight">
+<h3>6.1 新增配置段</h3>
+
+<h4>[custom.alpamayo.reward] — HCC-RM参数</h4>
+<pre><code># 原有参数（保留向后兼容）
+traj_l2_weight = 0.4
+comfort_weight = 0.1
+
+# HCC-RM 新增参数
+enable_hcc = true              # 【新增】显式开关，不设置则自动检测
+coc_quality_weight = 0.15     # 【新增】Layer 2: CoC推理质量权重
+raa_weight = 0.15             # 【新增】Layer 3: 推理-动作一致性权重
+scene_threshold = 0.3         # 【新增】Layer 1: 场景理解门控阈值</code></pre>
+
+<h4>[custom.alpamayo.pgmo] — PGMO-GRPO参数</h4>
+<pre><code>enable = true                  # 【新增】PGMO-GRPO总开关
+enable_pareto_weighting = true # 【新增】Pareto最优样本加权
+pareto_base_weight = 1.5       # 【新增】Pareto样本基础权重乘数
+enable_adaptive_kl = true      # 【新增】自适应KL调度
+adaptive_kl_lambda = 2.0       # 【新增】KL衰减率
+enable_contrastive = true      # 【新增】对比推理-动作学习
+contrastive_weight = 0.05      # 【新增】对比loss权重
+contrastive_temperature = 0.07  # 【新增】对比温度
+objective_weights = [0.25, 0.25, 0.25, 0.25]  # 【新增】4维目标权重
+
+# GSPO 专用参数（feat/gspo分支）
+gspo_epsilon_low = 0.2        # 【新增】序列级裁剪下界
+gspo_epsilon_high = 0.28      # 【新增】序列级裁剪上界</code></pre>
+
+<h4>[train.train_policy] — Trainer选择</h4>
+<pre><code>trainer_type = "reasoning_vla_gspo_grpo"  # 【修改】原值: "reasoning_vla_grpo"
+# 可选值:
+#   reasoning_vla_grpo        → 标准GRPO
+#   reasoning_vla_pgmo_grpo   → PGMO-GRPO
+#   reasoning_vla_gspo_grpo   → GSPO</code></pre>
+</div>
+
+<!-- ======== 7. ENTRY ======== -->
+<h2 id="sec-entry">七、入口脚本修改详情</h2>
+
+<div class="card highlight">
+<h3>7.1 <span class="file-path">alpamayo_cosmos_rl_post_training_entry.py</span> <span class="tag mod">MODIFIED</span></h3>
+
+<h4>改动清单</h4>
+<table>
+<tr><th>#</th><th>改动内容</th><th>说明</th></tr>
+<tr>
+  <td>1</td>
+  <td>文档字符串更新</td>
+  <td>新增 "Supports three training modes" 说明，列出所有trainer选项</td>
+</tr>
+<tr>
+  <td>2</td>
+  <td>新增GSPOTrainer import</td>
+  <td><code>from rl.models.reasoning_vla.gspo_trainer import GSPOTrainer</code> — 触发Cosmos注册</td>
+</tr>
+<tr>
+  <td>3</td>
+  <td>更新trainer_type文档注释</td>
+  <td>列出3个可选值：grpo / pgmo_grpo / gspo_grpo</td>
+</tr>
+</table>
+
+<h4>Trainer选择机制</h4>
+<pre><code># 通过环境变量切换，默认使用标准GRPO
+_trainer_type = os.environ.get("COSMOS_TRAINER_TYPE", "reasoning_vla_grpo")
+
+# ModelSpec传入trainer_type，Cosmos框架自动匹配注册的Trainer
+REASONING_VLA_SPEC = ModelSpec(
+    ...
+    trainer_type=_trainer_type,
+)</code></pre>
+</div>
+
+<h3>7.2 <span class="file-path">_spec.py</span> <span class="tag mod">MODIFIED</span></h3>
+
+<div class="card">
+<p><strong>改动</strong>：<code>ModelSpec</code> 新增 <code>trainer_type</code> 字段（默认 <code>"reasoning_vla_grpo"</code>），用于在 entry 中指定训练器类型。</p>
+</div>
+
+<!-- ======== 8. FILE MAP ======== -->
+<h2 id="sec-filemap">八、完整文件清单</h2>
+
+<table>
+<tr><th>#</th><th>文件路径</th><th>类型</th><th>行数</th><th>所属创新点</th></tr>
+<tr><td>1</td><td class="file-path">finetune/rl/rewards/coc_reward.py</td><td><span class="tag new">NEW</span></td><td>291</td><td>Innovation 1 HCC-RM</td></tr>
+<tr><td>2</td><td class="file-path">finetune/rl/rewards/raa_reward.py</td><td><span class="tag new">NEW</span></td><td>300</td><td>Innovation 1 HCC-RM</td></tr>
+<tr><td>3</td><td class="file-path">finetune/rl/rewards/hcc_reward.py</td><td><span class="tag new">NEW</span></td><td>257</td><td>Innovation 1 HCC-RM</td></tr>
+<tr><td>4</td><td class="file-path">finetune/rl/rewards/multi_objective.py</td><td><span class="tag new">NEW</span></td><td>208</td><td>Innovation 2 PGMO-GRPO</td></tr>
+<tr><td>5</td><td class="file-path">finetune/rl/utils/adaptive_kl.py</td><td><span class="tag new">NEW</span></td><td>156</td><td>Innovation 2 PGMO-GRPO</td></tr>
+<tr><td>6</td><td class="file-path">finetune/rl/utils/contrastive_loss.py</td><td><span class="tag new">NEW</span></td><td>168</td><td>Innovation 2 PGMO-GRPO</td></tr>
+<tr><td>7</td><td class="file-path">finetune/rl/models/reasoning_vla/pgmo_trainer.py</td><td><span class="tag new">NEW</span></td><td>637</td><td>Innovation 2 PGMO-GRPO</td></tr>
+<tr><td>8</td><td class="file-path">finetune/rl/utils/gspo_loss.py</td><td><span class="tag new">NEW</span></td><td>214</td><td>Innovation 3 GSPO</td></tr>
+<tr><td>9</td><td class="file-path">finetune/rl/models/reasoning_vla/gspo_trainer.py</td><td><span class="tag new">NEW</span></td><td>670</td><td>Innovation 3 GSPO</td></tr>
+<tr><td>10</td><td class="file-path">docs/alpamayo1_5_rl_innovations.html</td><td><span class="tag new">NEW</span></td><td>820</td><td>全部（研究方案文档）</td></tr>
+<tr><td>11</td><td class="file-path">docs/alpamayo1_5_rl_implementation_changes.html</td><td><span class="tag new">NEW</span></td><td>—</td><td>全部（本文档）</td></tr>
+<tr style="border-top: 2px solid var(--accent);"><td>12</td><td class="file-path">finetune/rl/rewards/aggregated_reward.py</td><td><span class="tag mod">MODIFIED</span></td><td>+65/-5</td><td>Innovation 1 HCC-RM</td></tr>
+<tr><td>13</td><td class="file-path">finetune/rl/models/reasoning_vla/alpamayo_cosmos_rl_post_training_entry.py</td><td><span class="tag mod">MODIFIED</span></td><td>+58/-6</td><td>全部trainer注册</td></tr>
+<tr><td>14</td><td class="file-path">finetune/rl/toml/alpamayo_rvla_rl_local_test.toml</td><td><span class="tag mod">MODIFIED</span></td><td>+53/-6</td><td>全部配置</td></tr>
+<tr><td>15</td><td class="file-path">finetune/rl/models/_spec.py</td><td><span class="tag mod">MODIFIED</span></td><td>+1</td><td>trainer_type字段</td></tr>
+</table>
+
+<div style="text-align: center; margin: 2.5rem 0 1rem; color: var(--text-dim); font-size: 0.85rem;">
+  <p>Alpamayo 1.5 RL Implementation Changes · Generated 2026-05-14</p>
+  <p>GitHub: <a href="https://github.com/ikutasama/alpamayo1.5" target="_blank">ikutasama/alpamayo1.5</a></p>
+</div>
+
+</body>
+</html>
