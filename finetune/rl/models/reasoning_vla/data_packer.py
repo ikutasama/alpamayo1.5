@@ -27,6 +27,80 @@ from rl.base_data_packer import BaseRLDataPacker
 from rl.utils.trajectory_decode import decode_rollout_trajectory
 from vllm.inputs import TokensPrompt
 
+_COMPLETION_MASK_KEYS = (
+    "coc_logprob_masks",
+    "traj_logprob_masks",
+    "format_logprob_masks",
+)
+
+
+def _first_token_pos(ids: torch.Tensor, token_id: int | None, start: int = 0) -> int | None:
+    """Return the first token position at or after ``start``."""
+    if token_id is None:
+        return None
+    matches = torch.nonzero(ids[start:] == token_id, as_tuple=False)
+    if matches.numel() == 0:
+        return None
+    return int(matches[0].item()) + start
+
+
+def build_completion_token_masks(
+    input_ids: torch.Tensor,
+    *,
+    prompt_len: int,
+    special_token_ids: dict[str, int | None],
+) -> dict[str, torch.Tensor]:
+    """Build completion, CoC, trajectory, and format token masks for one sequence."""
+    completion = torch.zeros_like(input_ids, dtype=torch.bool)
+    completion[prompt_len:] = True
+
+    coc = torch.zeros_like(completion)
+    traj = torch.zeros_like(completion)
+    fmt = torch.zeros_like(completion)
+
+    cot_end = _first_token_pos(input_ids, special_token_ids.get("cot_end"), prompt_len)
+    traj_start = _first_token_pos(
+        input_ids,
+        special_token_ids.get("traj_future_start"),
+        prompt_len,
+    )
+    traj_end = _first_token_pos(
+        input_ids,
+        special_token_ids.get("traj_future_end"),
+        prompt_len,
+    )
+
+    if cot_end is not None:
+        coc[prompt_len : cot_end + 1] = True
+    elif traj_start is not None:
+        coc[prompt_len:traj_start] = True
+
+    if traj_start is not None:
+        end = traj_end if traj_end is not None and traj_end >= traj_start else input_ids.numel() - 1
+        traj[traj_start : end + 1] = True
+
+    for key in ("cot_end", "traj_future_start", "traj_future_end"):
+        token_id = special_token_ids.get(key)
+        if token_id is not None:
+            fmt |= input_ids == token_id
+
+    return {
+        "logprob_masks": completion,
+        "coc_logprob_masks": coc & completion,
+        "traj_logprob_masks": traj & completion,
+        "format_logprob_masks": fmt & completion,
+    }
+
+
+def _advantage_routing_enabled(config: object | None) -> bool:
+    """Return whether optional token-level advantage routing is enabled."""
+    try:
+        alp_cfg = getattr(config, "custom")["alpamayo"]
+        routing_cfg = alp_cfg.get("advantage_routing", {})
+    except (TypeError, KeyError, AttributeError):
+        return False
+    return bool(routing_cfg.get("enable", False))
+
 
 class RVLADataPacker(BaseRLDataPacker):
     """Bridges Alpamayo samples to vLLM prompts + GRPO trainer batches."""
@@ -198,6 +272,7 @@ class RVLADataPacker(BaseRLDataPacker):
 
         end_id = alp_tok.convert_tokens_to_ids(SPECIAL_TOKENS["traj_future_end"])
         ids_row = input_ids[0]
+        prompt_len = int(ids_row.numel())
 
         gen_ids = alp_tok(rollout_output, add_special_tokens=False, return_tensors="pt")[
             "input_ids"
@@ -216,6 +291,16 @@ class RVLADataPacker(BaseRLDataPacker):
 
             tokenized["labels_mask"] = new_mask.unsqueeze(0)
             tokenized["input_ids"] = new_ids_row.unsqueeze(0)
+            special_ids = {
+                k: alp_tok.convert_tokens_to_ids(v) for k, v in SPECIAL_TOKENS.items()
+            }
+            completion_masks = build_completion_token_masks(
+                new_ids_row,
+                prompt_len=prompt_len,
+                special_token_ids=special_ids,
+            )
+            for key, mask in completion_masks.items():
+                tokenized[key] = mask.unsqueeze(0)
 
         predicted_fut_xyz, predicted_fut_rot = decode_rollout_trajectory(
             rollout_output,
@@ -228,9 +313,24 @@ class RVLADataPacker(BaseRLDataPacker):
         data_dict["ego_rollout_xyz"] = predicted_fut_xyz
         data_dict["ego_rollout_rot"] = predicted_fut_rot
 
-        #debug
-        print(f"[DEBUG] gen_ids.numel()={gen_ids.numel()}, labels_mask exists={'labels_mask' in tokenized}")
-        print(f"[DEBUG] rollout_output[:50]={rollout_output[:50]}")
+        if _advantage_routing_enabled(getattr(self, "config", None)):
+            from rl.rewards.aggregated_reward import compute_reward
+
+            _, reward_components = compute_reward(
+                rollout_output,
+                {
+                    "ego_future_xyz": data_dict["ego_future_xyz"],
+                    "ego_future_rot": data_dict["ego_future_rot"],
+                    "ego_history_xyz": data_dict["ego_history_xyz"],
+                    "ego_history_rot": data_dict["ego_history_rot"],
+                    "cot": data_dict.get("cot", ""),
+                },
+                tokenizer=alp_tok,
+                traj_tokenizer=traj_tok,
+                config=getattr(self, "config", None),
+                model_config=alp_state.get_ckpt_cfg(),
+            )
+            data_dict["reward_components"] = reward_components
 
         return data_dict
 
@@ -274,14 +374,18 @@ class RVLADataPacker(BaseRLDataPacker):
                 batch["labels_mask"] = lmask
             else:
                 batch["labels_mask"] = lmask.bool()
+        for key in _COMPLETION_MASK_KEYS:
+            if key in tokenized:
+                mask = tokenized[key]
+                batch[key] = mask if mask.dtype == torch.bool else mask.bool()
 
         # Build logprob_masks expected by trainer.compute_logprobs
-        if "labels_mask" in batch:
+        if "logprob_masks" in tokenized:
+            lmask = tokenized["logprob_masks"]
+            batch["logprob_masks"] = lmask if lmask.dtype == torch.bool else lmask.bool()
+        elif "labels_mask" in batch:
             lmask = batch["labels_mask"]
-            if lmask.dtype == torch.bool:
-                batch["logprob_masks"] = lmask
-            else:
-                batch["logprob_masks"] = lmask.bool()
+            batch["logprob_masks"] = lmask if lmask.dtype == torch.bool else lmask.bool()
         else:
             if "input_ids" in tokenized:
                 B, T = tokenized["input_ids"].shape

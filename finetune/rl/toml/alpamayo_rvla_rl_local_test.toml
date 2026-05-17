@@ -146,6 +146,22 @@ scene_threshold = 0.3
 # CoC dimension weights (factual, coherence, safety, completeness)
 # coc_dim_weights = { factual = 0.25, coherence = 0.30, safety = 0.25, completeness = 0.20 }
 
+# ---- Lightweight reward ablations for Causal Flow-GRPO routing ----
+# These are ignored unless enabled and are mainly useful when enable_hcc = false.
+enable_coc_reward = false
+coc_weight = 0.0
+enable_consistency_reward = false
+consistency_weight = 0.0
+enable_risk_reward = false
+risk_weight = 0.0
+
+[custom.alpamayo.advantage_routing]
+enable = false
+coc_weight = 1.0
+traj_weight = 1.0
+format_weight = 0.2
+fallback_weight = 1.0
+
 # ---- PGMO: Pareto-Guided Multi-Objective GRPO ----
 [custom.alpamayo.pgmo]
 # Master switch: enable PGMO-GRPO extensions

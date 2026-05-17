@@ -39,8 +39,17 @@ _HCC_REWARD_KEYS: list[str] = [
     "raa_weight",
 ]
 
+_OPTIONAL_REWARD_DEFAULTS: dict[str, float | bool] = {
+    "enable_coc_reward": False,
+    "coc_weight": 0.0,
+    "enable_consistency_reward": False,
+    "consistency_weight": 0.0,
+    "enable_risk_reward": False,
+    "risk_weight": 0.0,
+}
 
-def _get_reward_cfg(config: object | None) -> dict[str, float]:
+
+def _get_reward_cfg(config: object | None) -> dict[str, float | bool]:
     """Extract reward parameters from Cosmos TOML [custom.alpamayo.reward].
 
     Auto-detects HCC-RM vs legacy mode based on present keys.
@@ -57,7 +66,11 @@ def _get_reward_cfg(config: object | None) -> dict[str, float]:
     if missing:
         raise ValueError(f"Missing key(s) in [custom.alpamayo.reward]: {missing}")
 
-    return {k: float(reward_cfg[k]) for k in _REQUIRED_REWARD_KEYS}
+    cfg: dict[str, float | bool] = {k: float(reward_cfg[k]) for k in _REQUIRED_REWARD_KEYS}
+    for key, default in _OPTIONAL_REWARD_DEFAULTS.items():
+        value = reward_cfg.get(key, default)
+        cfg[key] = bool(value) if isinstance(default, bool) else float(value)
+    return cfg
 
 
 def _is_hcc_enabled(config: object | None) -> bool:
@@ -108,9 +121,12 @@ def compute_reward(
         )
 
     # ---- Legacy reward path (trajectory-only ADE + comfort) ----
+    from rl.rewards.consistency_reward import compute_reasoning_action_consistency
+    from rl.rewards.coc_reward import compute_coc_reward
     from rl.rewards.comfort_reward import compute_comfort
     from cosmos_rl.utils.logging import logger  # pyright: ignore[reportMissingImports]
 
+    from rl.rewards.risk_reward import compute_risk_reward
     from rl.rewards.traj_reward import calculate_ade
     from rl.utils.trajectory_decode import decode_rollout_trajectory
 
@@ -143,12 +159,34 @@ def compute_reward(
         )
     else:
         final_reward = -1.0
-    logger.debug(f"[compute_reward] Final reward (legacy): {final_reward}")
     reward_dict: dict[str, float] = {
         "traj_L2": float(l2_dist),
+        "traj_reward": float(-(l2_dist / ade_threshold) if l2_dist < ade_threshold else -1.0),
         "comfort_reward": float(comfort_score),
         "reward": float(final_reward),
         "reward_type": "legacy",
     }
+
+    if bool(w["enable_coc_reward"]):
+        coc = compute_coc_reward(to_be_evaluated, reference)
+        final_reward += float(w["coc_weight"]) * coc.reward
+        reward_dict.update(coc.to_dict(prefix="coc"))
+
+    if bool(w["enable_consistency_reward"]):
+        consistency = compute_reasoning_action_consistency(
+            to_be_evaluated,
+            predicted_fut_xyz,
+            reference,
+        )
+        final_reward += float(w["consistency_weight"]) * consistency.reward
+        reward_dict.update(consistency.to_dict(prefix="consistency"))
+
+    if bool(w["enable_risk_reward"]):
+        risk = compute_risk_reward(predicted_fut_xyz, reference)
+        final_reward += float(w["risk_weight"]) * risk.reward
+        reward_dict.update(risk.to_dict(prefix="risk"))
+
+    reward_dict["reward"] = float(final_reward)
+    logger.debug(f"[compute_reward] Final reward (legacy): {final_reward}")
 
     return reward_dict["reward"], reward_dict

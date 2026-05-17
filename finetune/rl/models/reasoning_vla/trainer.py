@@ -48,6 +48,43 @@ def _get_tb_writer(log_dir: str) -> SummaryWriter:
     return _TB_WRITER
 
 
+def _get_advantage_routing_cfg(config: Any) -> dict[str, Any]:
+    """Return optional token-level advantage routing config."""
+    try:
+        return getattr(config, "custom")["alpamayo"].get("advantage_routing", {})
+    except (TypeError, KeyError, AttributeError):
+        return {}
+
+
+def _normalize_grouped(
+    values: list[float],
+    payloads: list[Any],
+    fallback: list[float],
+) -> list[float]:
+    """Normalize component rewards within each prompt group, with safe fallback."""
+    groups: dict[tuple[str, str], list[int]] = {}
+    for idx, payload in enumerate(payloads):
+        if isinstance(payload, dict):
+            key = (str(payload.get("split", "")), str(payload.get("idx", idx)))
+        else:
+            key = ("", str(idx))
+        groups.setdefault(key, []).append(idx)
+
+    out = list(fallback)
+    eps = 1e-6
+    for indices in groups.values():
+        if len(indices) < 2:
+            continue
+        vals = np.array([values[i] for i in indices], dtype=np.float32)
+        std = float(vals.std())
+        if std <= eps:
+            continue
+        mean = float(vals.mean())
+        for i in indices:
+            out[i] = float((values[i] - mean) / std)
+    return out
+
+
 @TrainerRegistry.register(trainer_type="reasoning_vla_grpo")
 class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
     """GRPO trainer for reasoning VLA models."""
@@ -116,6 +153,11 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         ]
 
         advantages_t = torch.tensor(advantages_list).to(self.device)
+        component_advantages_t = self._build_component_advantages(
+            payloads_list,
+            processed_samples,
+            advantages_list,
+        )
 
         batch_size = len(rollouts)
         mini_batch_size = min(self.mini_batch, batch_size) if self.mini_batch > 0 else batch_size
@@ -167,7 +209,7 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                                 // self.seq_len_multiple
                                 * self.seq_len_multiple
                             )
-                            minibatched_advantages = (
+                            minibatched_scalar_advantages = (
                                 advantages_t[i:end]
                                 .unsqueeze(1)
                                 .expand(-1, computed_max_len)
@@ -243,7 +285,14 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                                     )
                                 )
                                 logprob_masks = user_mini_batch["logprob_masks"]
-                                current_advantages = logprob_masks * minibatched_advantages
+                                current_advantages = self._build_token_advantages(
+                                    user_mini_batch,
+                                    minibatched_scalar_advantages,
+                                    component_advantages_t,
+                                    start=i,
+                                    end=end,
+                                    computed_max_len=computed_max_len,
+                                )
 
                                 if is_computing_ref:
                                     assert i_mu == 0, "Only first iteration should compute ref"
@@ -354,6 +403,9 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                 report_data["train/local_loss"] = loss.item()
                 report_data["train/reward_mean"] = advantages_t.mean().item()
                 report_data["train/reward_std"] = advantages_t.std().item()
+                for key, tensor in component_advantages_t.items():
+                    report_data[f"train/advantage_{key}_mean"] = tensor.mean().item()
+                    report_data[f"train/advantage_{key}_std"] = tensor.std().item()
                 print(f"[Step {current_step}] loss={loss.item():.6f}, reward={advantages_t.mean().item():.4f}, gn={grad_norm_sum.item():.4f}")
 
                 if self.config.logging.report_mfu:
@@ -391,3 +443,105 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
             return loss.mean()
 
         return fake_compute_loss
+
+    def _build_component_advantages(
+        self,
+        payloads: list[Any],
+        processed_samples: list[Any],
+        fallback_advantages: list[float],
+    ) -> dict[str, torch.Tensor]:
+        """Build grouped component advantages for optional token routing."""
+        routing_cfg = _get_advantage_routing_cfg(self.config)
+        if not bool(routing_cfg.get("enable", False)):
+            return {}
+        if not all(isinstance(s, dict) and "reward_components" in s for s in processed_samples):
+            logger.warning(
+                "[AdvantageRouting] Enabled but reward_components are missing; "
+                "falling back to scalar GRPO advantages."
+            )
+            return {}
+
+        components = [s["reward_components"] for s in processed_samples]
+        fallback = [float(v) for v in fallback_advantages]
+
+        def value(name: str, default: float = 0.0) -> list[float]:
+            return [float(c.get(name, default)) for c in components]
+
+        def value_any(names: tuple[str, ...], default: float = 0.0) -> list[float]:
+            vals = []
+            for comp in components:
+                val = default
+                for name in names:
+                    if name in comp:
+                        val = comp[name]
+                        break
+                vals.append(float(val))
+            return vals
+
+        consistency = value_any(("consistency_reward", "raa_score"))
+        risk = value("risk_reward")
+        coc_values = [a + b for a, b in zip(value_any(("coc_reward", "coc_quality")), consistency)]
+        traj_values = [
+            a + b + c
+            for a, b, c in zip(value_any(("traj_reward", "reward")), consistency, risk)
+        ]
+        format_values = value_any(("coc_format_score", "coc_factual", "scene_understanding"))
+
+        adv = {
+            "coc": _normalize_grouped(coc_values, payloads, fallback),
+            "traj": _normalize_grouped(traj_values, payloads, fallback),
+            "format": _normalize_grouped(format_values, payloads, fallback),
+        }
+        return {
+            key: torch.tensor(vals, device=self.device, dtype=torch.float32)
+            for key, vals in adv.items()
+        }
+
+    def _build_token_advantages(
+        self,
+        user_mini_batch: dict[str, Any],
+        scalar_advantages: torch.Tensor,
+        component_advantages: dict[str, torch.Tensor],
+        *,
+        start: int,
+        end: int,
+        computed_max_len: int,
+    ) -> torch.Tensor:
+        """Route component advantages to CoC/traj/format tokens when enabled."""
+        logprob_masks = user_mini_batch["logprob_masks"]
+        base = logprob_masks * scalar_advantages
+        routing_cfg = _get_advantage_routing_cfg(self.config)
+        if not bool(routing_cfg.get("enable", False)) or not component_advantages:
+            return base
+
+        coc_mask = user_mini_batch.get("coc_logprob_masks")
+        traj_mask = user_mini_batch.get("traj_logprob_masks")
+        fmt_mask = user_mini_batch.get("format_logprob_masks")
+        if coc_mask is None or traj_mask is None or fmt_mask is None:
+            logger.warning(
+                "[AdvantageRouting] Token masks are missing; falling back to scalar advantages."
+            )
+            return base
+
+        routed = torch.zeros_like(base)
+        coc_weight = float(routing_cfg.get("coc_weight", 1.0))
+        traj_weight = float(routing_cfg.get("traj_weight", 1.0))
+        format_weight = float(routing_cfg.get("format_weight", 0.2))
+        fallback_weight = float(routing_cfg.get("fallback_weight", 1.0))
+
+        coc_adv = component_advantages["coc"][start:end].unsqueeze(1).expand(-1, computed_max_len)
+        traj_adv = component_advantages["traj"][start:end].unsqueeze(1).expand(-1, computed_max_len)
+        fmt_adv = (
+            component_advantages["format"][start:end]
+            .unsqueeze(1)
+            .expand(-1, computed_max_len)
+        )
+
+        routed += coc_mask * (coc_weight * coc_adv)
+        routed += traj_mask * (traj_weight * traj_adv)
+        routed += fmt_mask * (format_weight * fmt_adv)
+
+        routed_mask = (coc_mask | traj_mask | fmt_mask) & logprob_masks
+        fallback_mask = logprob_masks & ~routed_mask
+        routed += fallback_mask * (fallback_weight * scalar_advantages)
+        return routed

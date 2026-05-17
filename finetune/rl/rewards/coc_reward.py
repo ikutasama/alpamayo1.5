@@ -30,6 +30,9 @@ from typing import Any
 
 import numpy as np
 
+from alpamayo1_5.models.base_model import SPECIAL_TOKENS
+from rl.rewards.reward_types import RewardComponents
+
 # ---------------------------------------------------------------------------
 # Scene entity patterns for factual accuracy checking
 # ---------------------------------------------------------------------------
@@ -288,3 +291,146 @@ def compute_coc_quality(
     scores["coc_quality"] = float(np.clip(aggregated, 0.0, 1.0))
 
     return scores
+
+
+_LIGHTWEIGHT_RISK_WORDS = (
+    "risk",
+    "hazard",
+    "obstacle",
+    "vehicle",
+    "car",
+    "pedestrian",
+    "crosswalk",
+    "intersection",
+    "lane",
+    "merge",
+    "cut in",
+    "cut-in",
+    "traffic",
+    "light",
+    "stop",
+    "yield",
+    "curb",
+    "collision",
+)
+_LIGHTWEIGHT_ACTION_WORDS = (
+    "keep",
+    "maintain",
+    "slow",
+    "decelerate",
+    "accelerate",
+    "brake",
+    "stop",
+    "turn",
+    "left",
+    "right",
+    "straight",
+    "follow",
+    "yield",
+    "avoid",
+)
+
+
+def _between(text: str, start_token: str | None, end_token: str | None) -> str:
+    """Extract text between two optional markers."""
+    out = text
+    if start_token and start_token in out:
+        out = out.split(start_token, maxsplit=1)[-1]
+    if end_token and end_token in out:
+        out = out.split(end_token, maxsplit=1)[0]
+    return out.strip()
+
+
+def _word_overlap(a: str, b: str) -> float:
+    """Small lexical overlap score in [0, 1] for optional reference CoC text."""
+    toks_a = set(re.findall(r"[\w\u4e00-\u9fff]+", a.lower()))
+    toks_b = set(re.findall(r"[\w\u4e00-\u9fff]+", b.lower()))
+    if not toks_a or not toks_b:
+        return 0.0
+    return len(toks_a & toks_b) / max(1, len(toks_a | toks_b))
+
+
+def extract_coc_sections(to_be_evaluated: str) -> dict[str, str | float]:
+    """Extract CoC and trajectory text plus format indicators from a rollout completion."""
+    cot_start = SPECIAL_TOKENS["cot_start"]
+    cot_end = SPECIAL_TOKENS["cot_end"]
+    traj_start = SPECIAL_TOKENS["traj_future_start"]
+    traj_end = SPECIAL_TOKENS["traj_future_end"]
+
+    has_cot_end = cot_end in to_be_evaluated
+    has_traj_start = traj_start in to_be_evaluated
+    has_traj_end = traj_end in to_be_evaluated
+    ordered = (
+        (not has_cot_end or not has_traj_start)
+        or to_be_evaluated.find(cot_end) <= to_be_evaluated.find(traj_start)
+    )
+
+    reasoning = _between(
+        to_be_evaluated,
+        cot_start if cot_start in to_be_evaluated else None,
+        cot_end,
+    )
+    traj_text = _between(to_be_evaluated, traj_start, traj_end)
+    format_score = (
+        float(has_cot_end) * 0.4
+        + float(has_traj_start) * 0.3
+        + float(has_traj_end) * 0.2
+    )
+    format_score += float(ordered) * 0.1
+
+    return {
+        "reasoning": reasoning,
+        "traj_text": traj_text,
+        "has_cot_end": float(has_cot_end),
+        "has_traj_start": float(has_traj_start),
+        "has_traj_end": float(has_traj_end),
+        "format_score": min(1.0, format_score),
+    }
+
+
+def compute_coc_reward(
+    to_be_evaluated: str,
+    reference: dict[str, Any] | None = None,
+    *,
+    min_chars: int = 24,
+) -> RewardComponents:
+    """Score whether the generated CoC is structured and action-relevant.
+
+    This lightweight score is kept for reward ablations and token-level
+    advantage routing. The richer HCC-RM path continues to use
+    ``compute_coc_quality`` above.
+    """
+    sections = extract_coc_sections(to_be_evaluated)
+    reasoning = str(sections["reasoning"])
+    reasoning_l = reasoning.lower()
+
+    length_score = min(1.0, len(reasoning.strip()) / max(1, min_chars))
+    risk_score = float(any(w in reasoning_l for w in _LIGHTWEIGHT_RISK_WORDS))
+    action_score = float(any(w in reasoning_l for w in _LIGHTWEIGHT_ACTION_WORDS))
+    format_score = float(sections["format_score"])
+
+    ref_score = 0.0
+    if reference and isinstance(reference.get("cot", ""), str):
+        ref_score = _word_overlap(reasoning, reference["cot"])
+
+    reward = (
+        0.35 * format_score
+        + 0.20 * length_score
+        + 0.20 * risk_score
+        + 0.20 * action_score
+        + 0.05 * ref_score
+    )
+
+    return RewardComponents(
+        reward=float(reward),
+        metrics={
+            "format_score": float(format_score),
+            "length_score": float(length_score),
+            "risk_keyword_score": float(risk_score),
+            "action_keyword_score": float(action_score),
+            "reference_overlap": float(ref_score),
+            "has_cot_end": float(sections["has_cot_end"]),
+            "has_traj_start": float(sections["has_traj_start"]),
+            "has_traj_end": float(sections["has_traj_end"]),
+        },
+    )
