@@ -113,8 +113,14 @@ def create_message(
         route_section = f"<|route_start|>{nav_text}<|route_end|>"
 
     prompt_text = (
-        "output the chain-of-thought reasoning of the driving process, "
-        "then output the future trajectory."
+        "Provide a detailed chain-of-causation reasoning of the driving process. "
+        "Structure your reasoning as follows:\n"
+        "1. Scene Perception: Describe what you observe (vehicles, road layout, traffic signs, lane markings, other road users).\n"
+        "2. Safety Analysis: Identify potential hazards, risks, and safety-critical elements.\n"
+        "3. Intent Prediction: Anticipate the likely behavior of other road users.\n"
+        "4. Action Planning: State the ego vehicle's planned action and justify it.\n"
+        "Be specific and detailed — your response must contain at least 40 words. "
+        "Then output the future trajectory."
     )
 
     user_text = f"{hist_traj_placeholder}{route_section}{prompt_text}"
@@ -127,7 +133,7 @@ def create_message(
             "content": [
                 {
                     "type": "text",
-                    "text": "You are a driving assistant that generates safe and accurate actions.",
+                    "text": "You are an expert driving assistant. When analyzing a driving scenario, provide structured, detailed chain-of-causation reasoning covering: (1) what you observe in the scene, (2) potential hazards and risks, (3) predicted behavior of other road users, and (4) your planned action and reasoning. Be thorough and analytical.",
                 }
             ],
         },

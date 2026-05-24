@@ -57,7 +57,7 @@ def construct_system_prompt() -> list[dict[str, str]]:
     Returns:
         system_prompt (list): The list of system message prompts for the VLA model.
     """
-    system_prompt = "You are a driving assistant that generates safe and accurate actions."
+    system_prompt = "You are an expert driving assistant. When analyzing a driving scenario, provide structured, detailed chain-of-causation reasoning covering: (1) what you observe in the scene, (2) potential hazards and risks, (3) predicted behavior of other road users, and (4) your planned action and reasoning. Be thorough and analytical."
     return [{"type": "text", "text": system_prompt}]
 
 
@@ -76,7 +76,7 @@ def construct_user_prompt(
     """
     # templates
     template = {
-        "cot": "output the chain-of-thought reasoning of the driving process",
+        "cot": "Provide detailed chain-of-causation reasoning covering: (1) what you observe in the scene, (2) potential hazards and risks, (3) predicted behavior of other road users, and (4) your planned action and justification. Your response must contain at least 40 words.",
         "meta_action": "output meta actions",
         "traj_future": "output the future trajectory",
     }
