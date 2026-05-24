@@ -97,6 +97,51 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
         self._adaptive_kl_scheduler = None
         self._pgmo_cfg = None
 
+    def _normalize_advantages_pgmo(
+        self, advantages_t: torch.Tensor, step: int
+    ) -> torch.Tensor:
+        """Normalize advantages to zero-mean, unit-variance and clip extreme values."""
+        cfg = self._get_advantage_normalization_cfg()
+        if not cfg.get("enable", True):
+            return advantages_t
+
+        eps = cfg.get("eps", 1e-8)
+        clip_value = cfg.get("clip_value", 3.0)
+        use_running_stats = cfg.get("use_running_stats", False)
+
+        mean = advantages_t.mean().item()
+        std = max(advantages_t.std().item(), eps)
+
+        if use_running_stats:
+            prev_mean = getattr(self, "_adv_mean", mean)
+            prev_std = getattr(self, "_adv_std", std)
+            alpha = cfg.get("ema_alpha", 0.99)
+            mean = alpha * prev_mean + (1 - alpha) * mean
+            std = alpha * prev_std + (1 - alpha) * std
+            self._adv_mean = mean
+            self._adv_std = std
+
+        normalized = (advantages_t - mean) / std
+        if clip_value > 0:
+            normalized = torch.clamp(normalized, -clip_value, clip_value)
+
+        if step % 10 == 0:
+            logger.info(
+                f"[AdvNorm-PGMO] step={step}: raw mean={mean:.4f}, std={std:.4f} "
+                f"-> norm mean={normalized.mean().item():.4f}, std={normalized.std().item():.4f}, "
+                f"clip=[-{clip_value},+{clip_value}]"
+            )
+        return normalized
+
+    def _get_advantage_normalization_cfg(self) -> dict[str, Any]:
+        """Extract advantage normalization config from TOML [custom.alpamayo]."""
+        try:
+            return getattr(self.config, "custom", {}).get("alpamayo", {}).get(
+                "advantage_normalization", {}
+            )
+        except (TypeError, AttributeError):
+            return {}
+
     def _init_pgmo(self) -> None:
         """Lazy-initialize PGMO components from config."""
         if self._pgmo_cfg is not None:
@@ -197,6 +242,7 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
             advantages_t = compute_weighted_scalar_advantage(
                 multi_advantages, obj_w, pareto_weights=pareto_w
             )
+            advantages_t = self._normalize_advantages_pgmo(advantages_t, current_step)
 
             # Log Pareto stats
             n_pareto = (
@@ -226,6 +272,7 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
         else:
             # Standard scalar advantage
             advantages_t = torch.tensor(advantages_list).to(self.device)
+            advantages_t = self._normalize_advantages_pgmo(advantages_t, current_step)
 
         # ---- Positive NLL setup (unchanged) ----
         pos_coef_global = self.config.train.train_policy.positive_nll_coef
@@ -371,7 +418,9 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
                                     "Pipeline Parallel not supported for PGMO"
                                 )
 
+                            saved_input_ids = user_mini_batch.get("input_ids")
                             model_out = self.model(**user_mini_batch)
+                            user_mini_batch["input_ids"] = saved_input_ids
 
                             if self.parallel_dims.cp_enabled:
                                 user_mini_batch["position_ids"] = position_ids_before_cp
@@ -420,7 +469,6 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
                                 else:
                                     assert i_mu > 0
 
-                                # ---- Standard GRPO loss ----
                                 loss, per_token_loss, kl_loss = compute_loss(
                                     current_per_token_logprobs,
                                     self.old_per_token_logps[local_mini_step],
@@ -435,7 +483,6 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
                                     ddp_comm=inter_policy_nccl,
                                 )
 
-                                # ---- Contrastive loss (PGMO) ----
                                 contrastive_loss_val = torch.tensor(
                                     0.0, device=self.device
                                 )
@@ -444,20 +491,17 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
                                         compute_contrastive_loss_simple,
                                     )
 
-                                    # Pool hidden states
                                     if hasattr(model_out, "hidden_states"):
                                         hidden = model_out.hidden_states[-1]
                                     elif hasattr(self.model, "vlm") and hasattr(
                                         self.model.vlm, "language_model"
                                     ):
-                                        # Get last hidden from VLM forward
                                         hidden = raw_logits
                                     else:
                                         hidden = None
 
                                     if hidden is not None and hidden.dim() >= 2:
-                                        pooled = hidden.mean(dim=1)  # [B, D]
-                                        # Use rewards from the current mini-batch
+                                        pooled = hidden.mean(dim=1)
                                         batch_rewards = torch.tensor(
                                             rewards_list[i:end],
                                             device=self.device,
@@ -478,7 +522,6 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
                                             contrastive_loss_val.item()
                                         )
 
-                                # ---- Positive NLL (unchanged) ----
                                 if (
                                     pos_coef_global is not None
                                     and pos_coef_global > 0.0
@@ -495,7 +538,6 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
                                         ].mean()
                                         loss = loss + pos_coef_global * l_nll
 
-                                # Combine with contrastive loss
                                 total_loss_step = (
                                     loss + contrastive_loss_val
                                 ) / num_mini_batch
@@ -509,24 +551,24 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
                                 for key in metrics:
                                     self.metrics[key] += metrics[key]
 
-                            self.mini_step += 1
-                            local_mini_step += 1
+                                self.mini_step += 1
+                                local_mini_step += 1
 
-                            if (
-                                local_mini_step
-                                % int(
-                                    os.environ.get(
-                                        "COSMOS_GRPO_STEP_INTERVAL", "10"
+                                if (
+                                    local_mini_step
+                                    % int(
+                                        os.environ.get(
+                                            "COSMOS_GRPO_STEP_INTERVAL", "10"
+                                        )
                                     )
-                                )
-                                == 0
-                            ) and local_mini_step > 1:
-                                all_reduced = True
-                                grad_norm_sum += self.all_reduce_states(
-                                    inter_policy_nccl
-                                )
-                            else:
-                                all_reduced = False
+                                    == 0
+                                ) and local_mini_step > 1:
+                                    all_reduced = True
+                                    grad_norm_sum += self.all_reduce_states(
+                                        inter_policy_nccl
+                                    )
+                                else:
+                                    all_reduced = False
 
                         if not is_computing_ref and not all_reduced:
                             grad_norm_sum += self.all_reduce_states(
@@ -574,7 +616,7 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
                 report_data["train/grad_norm"] = grad_norm_sum.item()
                 report_data["train/local_loss"] = loss.item()
                 report_data["train/reward_mean"] = advantages_t.mean().item()
-                report_data["train/reward_std"] = advantages_t.std().item()
+                report_data["train/reward_std"] = advantages_t.std().item() if advantages_t.numel() > 1 else 0.0
                 if self._pgmo_cfg["enable_contrastive"]:
                     report_data["train/contrastive_loss"] = contrastive_loss_avg
 
@@ -589,7 +631,6 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
                     )
                 )
 
-                # Adaptive KL stats
                 if self._adaptive_kl_scheduler:
                     kl_stats = self._adaptive_kl_scheduler.get_stats()
                     for k, v in kl_stats.items():

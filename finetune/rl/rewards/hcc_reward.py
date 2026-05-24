@@ -26,6 +26,7 @@ This is the main entry point for HCC-RM reward computation.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import torch
@@ -75,6 +76,99 @@ def _get_hcc_cfg(config: object | None) -> dict[str, float]:
         "ade_threshold": float(reward_cfg.get("ade_threshold", 3.0)),
         "coc_weights": reward_cfg.get("coc_dim_weights", None),
     }
+
+
+def _compute_length_bonus(word_count: int) -> float:
+    """Compute CoC length bonus/penalty to encourage 20-40 words.
+
+    Args:
+        word_count: Number of words in the CoC text.
+
+    Returns:
+        Bonus in [-0.40, +0.50]. Positive for >=20 words, negative for shorter.
+    """
+    if word_count < 10:
+        return -0.40
+    if word_count < 15:
+        t = (word_count - 10.0) / 5.0
+        return -0.40 + t * 0.60
+    if word_count < 25:
+        t = (word_count - 15.0) / 10.0
+        return 0.20 + t * 0.30
+    if word_count <= 40:
+        t = (word_count - 25.0) / 15.0
+        return 0.50 - 0.10 * t
+    if word_count <= 60:
+        return 0.40
+    return 0.40
+
+
+def _check_coc_traj_consistency(
+    coc_text: str,
+    predicted_fut_xyz: torch.Tensor,
+    predicted_fut_rot: torch.Tensor,
+) -> float:
+    """Penalize when CoC action description contradicts the actual trajectory.
+
+    Args:
+        coc_text: The extracted CoC reasoning text.
+        predicted_fut_xyz: Predicted trajectory XYZ.
+        predicted_fut_rot: Predicted trajectory rotations.
+
+    Returns:
+        Consistency penalty in [-0.15, 0.0]. Negative = penalty, 0 = no penalty.
+    """
+    if not coc_text or len(coc_text.strip()) < 10:
+        return 0.0
+
+    coc_text_l = coc_text.lower()
+    import re as _re
+
+    coc_lon_decel = float(any(_re.search(p, coc_text_l) for p in [
+        r"\bslow down\b", r"\bdecelerate\b", r"\bbrake\b", r"\breduce speed\b",
+        r"\byield\b", r"\bstop\b(?! at| for)", r"\bwait\b",
+    ]))
+    coc_lon_accel = float(any(_re.search(p, coc_text_l) for p in [
+        r"\bspeed up\b", r"\baccelerate\b", r"\bincrease speed\b", r"\bproceed\b",
+        r"\bgo\b(?!odbye)", r"\badvance\b", r"\bresume\b", r"\bcontinue\b",
+    ]))
+    coc_lat_left = float(any(_re.search(p, coc_text_l) for p in [
+        r"\bturn left\b", r"\bleft turn\b", r"\bsteer left\b", r"\bchange.*left\b",
+    ]))
+    coc_lat_right = float(any(_re.search(p, coc_text_l) for p in [
+        r"\bturn right\b", r"\bright turn\b", r"\bsteer right\b", r"\bchange.*right\b",
+    ]))
+
+    heading = torch.atan2(predicted_fut_rot[..., 1, 0], predicted_fut_rot[..., 0, 0])
+    dx = predicted_fut_xyz[1:, 0] - predicted_fut_xyz[:-1, 0]
+    dy = predicted_fut_xyz[1:, 1] - predicted_fut_xyz[:-1, 1]
+    speeds = torch.sqrt(dx**2 + dy**2)
+    speed_start = speeds[:5].mean() if len(speeds) >= 5 else speeds.mean()
+    speed_end = speeds[-5:].mean() if len(speeds) >= 5 else speeds.mean()
+    total_dh = (heading[1:] - heading[:-1]).sum().item()
+    total_dy = (predicted_fut_xyz[-1, 1] - predicted_fut_xyz[0, 1]).item()
+
+    traj_lon_accel = 0.0
+    traj_lon_decel = 0.0
+    if speed_start > 0.1:
+        speed_change = (speed_end - speed_start) / speed_start
+        traj_lon_accel = float(max(0, speed_change > 0.1))
+        traj_lon_decel = float(max(0, speed_change < -0.1))
+
+    traj_lat_left = max(0.0, min(1.0, -total_dy / 3.5)) if total_dy < -0.5 else 0.0
+    traj_lat_right = max(0.0, min(1.0, total_dy / 3.5)) if total_dy > 0.5 else 0.0
+
+    violations = 0.0
+    if coc_lon_decel > 0.3 and traj_lon_accel > 0.3:
+        violations += 1.0
+    if coc_lon_accel > 0.3 and traj_lon_decel > 0.3:
+        violations += 1.0
+    if coc_lat_left > 0.3 and traj_lat_right > 0.3:
+        violations += 1.0
+    if coc_lat_right > 0.3 and traj_lat_left > 0.3:
+        violations += 1.0
+
+    return -min(0.15, violations * 0.05)
 
 
 def compute_hcc_reward(
@@ -134,9 +228,28 @@ def compute_hcc_reward(
     # Layer 1: Scene Understanding (Factual Accuracy Gating)
     # ============================================================
     coc_scores = compute_coc_quality(to_be_evaluated, weights=w.get("coc_weights"))
-    s1_scene = coc_scores["coc_factual"]  # Use factual accuracy as scene understanding
 
-    # If scene understanding is too low, gate the entire reward
+    _coc_text = to_be_evaluated.split("<|cot_end|>")[0].strip() if "<|cot_end|>" in to_be_evaluated else to_be_evaluated.strip()
+    _word_count = len(_coc_text.split())
+
+    print(f"\n[CoC-Debug] word_count={_word_count} factual={coc_scores.get('coc_factual',0):.3f} coherence={coc_scores.get('coc_coherence',0):.3f} safety={coc_scores.get('coc_safety',0):.3f} completeness={coc_scores.get('coc_completeness',0):.3f}\n{_coc_text[:600]}\n[CoC-Debug-End]", flush=True)
+
+    length_bonus = _compute_length_bonus(_word_count)
+    consistency_penalty = _check_coc_traj_consistency(
+        _coc_text, predicted_fut_xyz[0], predicted_fut_rot[0]
+    )
+
+    if _word_count < 10:
+        coc_scores = {
+            "coc_factual": 0.0,
+            "coc_coherence": 0.0,
+            "coc_safety": 0.0,
+            "coc_completeness": 0.0,
+            "coc_quality": 0.0,
+        }
+
+    s1_scene = coc_scores["coc_factual"]
+
     scene_threshold = w["scene_threshold"]
     if s1_scene < scene_threshold:
         logger.debug(
@@ -154,7 +267,8 @@ def compute_hcc_reward(
             "traj_L2": 999.0,
             "comfort_reward": 0.0,
             "reward": -1.0,
-            "reward_type": "hcc_gated_scene",
+            "length_bonus": float(length_bonus),
+            "consistency_penalty": float(consistency_penalty),
         }
         return -1.0, reward_dict
 
@@ -164,6 +278,13 @@ def compute_hcc_reward(
     s2_coc = coc_scores.get("coc_quality", 0.0)
     # Normalize to [-1, 1] range: 0→0.0, 1→1.0
     s2_coc_normalized = 2.0 * s2_coc - 1.0  # [0,1] → [-1,1]
+    logger.info(
+        f"[CoC-Detail] factual={coc_scores.get('coc_factual', 0):.3f} "
+        f"coherence={coc_scores.get('coc_coherence', 0):.3f} "
+        f"safety={coc_scores.get('coc_safety', 0):.3f} "
+        f"completeness={coc_scores.get('coc_completeness', 0):.3f} "
+        f"coc_quality={s2_coc:.3f} -> s2_norm={s2_coc_normalized:.3f}"
+    )
 
     # ============================================================
     # Layer 3: Reasoning-Action Alignment
@@ -178,60 +299,61 @@ def compute_hcc_reward(
     # Layer 4: Trajectory Quality (ADE + Comfort)
     # ============================================================
     l2_dist = calculate_ade(predicted_fut_xyz[0], gt_fut_xyz[0])
+    if not (isinstance(l2_dist, (int, float)) and math.isfinite(l2_dist)):
+        logger.warning(f"[HCC-Reward] ADE returned non-finite={l2_dist}, using fallback 999.0")
+        l2_dist = 999.0
 
     comfort_dict_t = compute_comfort(
         predicted_fut_xyz[:, None, None, ...],
         predicted_fut_rot[:, None, None, ...],
     )
     comfort_score = float(sum(comfort_dict_t.values()) / len(comfort_dict_t))
+    if not (isinstance(comfort_score, (int, float)) and math.isfinite(comfort_score)):
+        logger.warning(f"[HCC-Reward] comfort_score non-finite={comfort_score}, using 0")
+        comfort_score = 0.0
     comfort_score_norm = comfort_score - 1.0  # Center around 0
 
-    # ADE-based trajectory quality normalized to [-1, 1]
-    ade_threshold = w["ade_threshold"]
-    if l2_dist < ade_threshold:
-        s4_traj = - (l2_dist / ade_threshold)  # [0, -1]
-        s4_comfort = comfort_score_norm  # Already centered
-    else:
-        s4_traj = -1.0
-        s4_comfort = -1.0
+    # Continuous trajectory reward: exp(-ade/2) in [0, 1]
+    s4_traj = float(__import__('math').exp(-l2_dist / 2.0))
+    s4_comfort = comfort_score_norm
 
-    # Combined trajectory quality
-    tw = w["traj_l2_weight"]
-    cw = w["comfort_weight"]
+    tw = w.get("traj_l2_weight", 0.5)
+    cw = w.get("comfort_weight", 0.1)
     tw_cw_sum = tw + cw
     if tw_cw_sum > 0:
         s4_combined = (tw * s4_traj + cw * s4_comfort) / tw_cw_sum
     else:
         s4_combined = s4_traj
 
-    # ============================================================
-    # Layer Aggregation with hierarchical gating
-    # ============================================================
+    s4_combined = max(0.0, s4_combined)
+
+    # Additive reward formula: all layers contribute directly
     coc_w = w["coc_quality_weight"]
     raa_w = w["raa_weight"]
-    traj_w = max(0.0, 1.0 - coc_w - raa_w)
+    scene_w = w.get("scene_reward_weight", 0.3)
+    traj_layer_w = max(0.0, 1.0 - scene_w - coc_w - raa_w)
 
-    raw_reward = (
-        coc_w * s2_coc_normalized
+    final_reward = (
+        scene_w * s1_scene
+        + coc_w * s2_coc_normalized
         + raa_w * s3_raa_normalized
-        + traj_w * s4_combined
+        + traj_layer_w * s4_combined
+        + length_bonus
+        + consistency_penalty
     )
 
-    # ADE gating: if trajectory is terrible, still penalize
-    if l2_dist >= ade_threshold:
-        # Only reasoning quality and RAA can save it partially
-        raw_reward = min(raw_reward, -0.8)
+    if not (isinstance(final_reward, (int, float)) and math.isfinite(final_reward)):
+        logger.warning(f"[HCC-Reward] final_reward non-finite={final_reward}, clamping to 0")
+        final_reward = 0.0
 
-    # Apply scene understanding as a global multiplier
-    final_reward = s1_scene * raw_reward
-
-    # Clamp to reasonable range
     final_reward = float(max(-1.0, min(1.0, final_reward)))
 
-    logger.debug(
+    logger.warning(
         f"[HCC-RM] s1(scene)={s1_scene:.3f} s2(coc)={s2_coc_normalized:.3f} "
         f"s3(raa)={s3_raa_normalized:.3f} s4(traj)={s4_combined:.3f} "
-        f"→ R={final_reward:.4f}"
+        f"s4_l2={l2_dist:.3f} s4_comf={comfort_score:.3f} "
+        f"len_bonus={length_bonus:.3f} cons_pen={consistency_penalty:.3f} "
+        f"R_final={final_reward:.4f}"
     )
 
     reward_dict = {
@@ -245,11 +367,12 @@ def compute_hcc_reward(
         "traj_L2": float(l2_dist),
         "comfort_reward": float(comfort_score),
         "reward": float(final_reward),
-        "reward_type": "hcc",
+        "length_bonus": float(length_bonus),
+        "consistency_penalty": float(consistency_penalty),
         **{
-            k: float(v) if isinstance(v, (float, int)) else v
+            k: float(v) if isinstance(v, (float, int)) else 0.0
             for k, v in raa_info.items()
-            if not k.startswith("raa_score")
+            if not k.startswith("raa_score") and k != "raa_empty_coc"
         },
     }
 

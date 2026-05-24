@@ -164,7 +164,6 @@ def compute_reward(
         "traj_reward": float(-(l2_dist / ade_threshold) if l2_dist < ade_threshold else -1.0),
         "comfort_reward": float(comfort_score),
         "reward": float(final_reward),
-        "reward_type": "legacy",
     }
 
     if bool(w["enable_coc_reward"]):

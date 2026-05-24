@@ -43,13 +43,10 @@ SCENE_ENTITY_PATTERNS: dict[str, list[str]] = {
     ],
     "road_structure": [
         r"\b(lane|intersection|crosswalk|traffic light|stop sign|yield sign)\b",
-        r"\b(highway|ramp|roundabout|junction|merge|exit)\b",
-    ],
-    "weather": [
-        r"\b(rain|snow|fog|sun|glare|night|wet|icy|slippery)\b",
+        r"\b(highway|ramp|roundabout|junction|merge|exit|road)\b",
     ],
     "traffic_condition": [
-        r"\b(congestion|heavy traffic|light traffic|stopped|moving)\b",
+        r"\b(congestion|heavy traffic|light traffic|stopped|moving|speed)\b",
     ],
 }
 
@@ -127,10 +124,8 @@ def score_factual_accuracy(coc_text: str) -> float:
     Returns:
         Score in [0, 1] where 1 means highly factual/specific.
     """
-    if not coc_text or len(coc_text.strip()) < 20:
+    if not coc_text:
         return 0.0
-
-    # Count how many entity categories are mentioned
     category_scores = []
     for category, patterns in SCENE_ENTITY_PATTERNS.items():
         cat_hits = 0
@@ -139,17 +134,39 @@ def score_factual_accuracy(coc_text: str) -> float:
                 cat_hits += 1
         category_scores.append(min(cat_hits / len(patterns), 1.0))
 
-    # Base score from category coverage
     factual_score = float(np.mean(category_scores))
-
-    # Penalize very short or very generic CoC
-    word_count = len(coc_text.split())
+    word_count = len(coc_text.strip().split())
+    if word_count < 10:
+        return 0.0
     if word_count < 20:
-        factual_score *= 0.5
-    elif word_count < 40:
-        factual_score *= 0.8
-
+        return float(word_count - 10) / 10.0 * float(np.clip(factual_score, 0.0, 1.0))
     return float(np.clip(factual_score, 0.0, 1.0))
+
+
+def score_causal_coherence_unchecked(coc_text: str) -> float:
+    scores = []
+    causal_hits = sum(
+        1 for pattern in CAUSAL_CONNECTORS if re.search(pattern, coc_text, re.IGNORECASE)
+    )
+    scores.append(min(causal_hits / 3.0, 1.0))
+    decision_hits = sum(
+        1 for pattern in DECISION_KEYWORDS if re.search(pattern, coc_text, re.IGNORECASE)
+    )
+    scores.append(min(decision_hits / 2.0, 1.0))
+    has_observation = any(
+        re.search(p, coc_text, re.IGNORECASE) for p in [
+            r"\b(see|observe|notice|detect|visible|appears|present)\b",
+            r"\b(currently|now|situation|scenario|condition)\b",
+        ]
+    )
+    has_action = any(
+        re.search(p, coc_text, re.IGNORECASE) for p in [
+            r"\b(should|will|need to|must|plan to|decide to)\b",
+        ]
+    )
+    structure_score = (has_observation + has_action) / 2.0
+    scores.append(structure_score)
+    return float(np.clip(np.mean(scores), 0.0, 1.0))
 
 
 def score_causal_coherence(coc_text: str) -> float:
@@ -164,39 +181,12 @@ def score_causal_coherence(coc_text: str) -> float:
     Returns:
         Score in [0, 1] where 1 means logically coherent.
     """
-    if not coc_text or len(coc_text.strip()) < 20:
+    word_count = len(coc_text.strip().split())
+    if word_count < 10:
         return 0.0
-
-    scores = []
-
-    # 1. Check for causal connectors (does the text establish causal links?)
-    causal_hits = sum(
-        1 for pattern in CAUSAL_CONNECTORS if re.search(pattern, coc_text, re.IGNORECASE)
-    )
-    scores.append(min(causal_hits / 3.0, 1.0))  # At least 3 causal connectors ideal
-
-    # 2. Check for decision keywords (does it describe a decision?)
-    decision_hits = sum(
-        1 for pattern in DECISION_KEYWORDS if re.search(pattern, coc_text, re.IGNORECASE)
-    )
-    scores.append(min(decision_hits / 2.0, 1.0))
-
-    # 3. Structural check: does the text have both "observation" and "action" parts?
-    has_observation = any(
-        re.search(p, coc_text, re.IGNORECASE) for p in [
-            r"\b(see|observe|notice|detect|visible|appears|present)\b",
-            r"\b(currently|now|situation|scenario|condition)\b",
-        ]
-    )
-    has_action = any(
-        re.search(p, coc_text, re.IGNORECASE) for p in [
-            r"\b(should|will|need to|must|plan to|decide to)\b",
-        ]
-    )
-    structure_score = (has_observation + has_action) / 2.0
-    scores.append(structure_score)
-
-    return float(np.clip(np.mean(scores), 0.0, 1.0))
+    if word_count < 20:
+        return float(word_count - 10) / 10.0 * score_causal_coherence_unchecked(coc_text)
+    return score_causal_coherence_unchecked(coc_text)
 
 
 def score_safety_awareness(coc_text: str) -> float:
@@ -211,13 +201,16 @@ def score_safety_awareness(coc_text: str) -> float:
     Returns:
         Score in [0, 1] where 1 means highly safety-aware.
     """
-    if not coc_text or len(coc_text.strip()) < 20:
+    word_count = len(coc_text.strip().split())
+    if word_count < 10:
         return 0.0
-
     safety_hits = sum(
         1 for pattern in SAFETY_KEYWORDS if re.search(pattern, coc_text, re.IGNORECASE)
     )
-    return float(np.clip(safety_hits / 4.0, 0.0, 1.0))
+    base = float(np.clip(safety_hits / 4.0, 0.0, 1.0))
+    if word_count < 20:
+        return float(word_count - 10) / 10.0 * base
+    return base
 
 
 def score_completeness(coc_text: str) -> float:
@@ -232,7 +225,8 @@ def score_completeness(coc_text: str) -> float:
     Returns:
         Score in [0, 1] where 1 means all dimensions are covered.
     """
-    if not coc_text or len(coc_text.strip()) < 20:
+    word_count = len(coc_text.strip().split())
+    if word_count < 10:
         return 0.0
 
     dimension_scores = []
@@ -242,7 +236,10 @@ def score_completeness(coc_text: str) -> float:
         )
         dimension_scores.append(1.0 if dim_hits else 0.0)
 
-    return float(np.mean(dimension_scores))
+    base = float(np.mean(dimension_scores))
+    if word_count < 20:
+        return float(word_count - 10) / 10.0 * base
+    return base
 
 
 def compute_coc_quality(
@@ -266,13 +263,17 @@ def compute_coc_quality(
     """
     if weights is None:
         weights = {
-            "factual": 0.25,
-            "coherence": 0.30,
-            "safety": 0.25,
-            "completeness": 0.20,
+            "factual": 0.30,
+            "coherence": 0.35,
+            "safety": 0.10,
+            "completeness": 0.25,
         }
 
     coc_text = extract_coc_text(to_be_evaluated)
+
+    import logging as _logging
+    _logger = _logging.getLogger("cosmos")
+    _logger.info(f"[CoC-Debug] coc_text={coc_text[:300]!r}")
 
     scores = {
         "coc_factual": score_factual_accuracy(coc_text),

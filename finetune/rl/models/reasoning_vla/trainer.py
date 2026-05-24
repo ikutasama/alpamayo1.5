@@ -93,6 +93,56 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         super().__init__(*args, **kwargs)
         self._tb_writer = None
 
+    def _normalize_advantages(self, advantages_t: torch.Tensor, step: int) -> torch.Tensor:
+        cfg = self._get_advantage_normalization_cfg()
+        if not cfg.get("enable", True):
+            return advantages_t
+
+        nan_mask = torch.isnan(advantages_t) | torch.isinf(advantages_t)
+        if nan_mask.any():
+            n_nan = nan_mask.sum().item()
+            logger.warning(
+                f"[AdvNorm] step={step}: {n_nan}/{advantages_t.numel()} advantages are NaN/inf, replacing with 0"
+            )
+            advantages_t = advantages_t.clone()
+            advantages_t[nan_mask] = 0.0
+
+        eps = cfg.get("eps", 1e-8)
+        clip_value = cfg.get("clip_value", 3.0)
+        use_running_stats = cfg.get("use_running_stats", False)
+
+        mean = advantages_t.mean().item()
+        std = max(advantages_t.std().item(), eps)
+
+        if use_running_stats:
+            prev_mean = getattr(self, "_adv_mean", mean)
+            prev_std = getattr(self, "_adv_std", std)
+            alpha = cfg.get("ema_alpha", 0.99)
+            mean = alpha * prev_mean + (1 - alpha) * mean
+            std = alpha * prev_std + (1 - alpha) * std
+            self._adv_mean = mean
+            self._adv_std = std
+
+        normalized = (advantages_t - mean) / std
+        if clip_value > 0:
+            normalized = torch.clamp(normalized, -clip_value, clip_value)
+
+        if step % 10 == 0:
+            logger.info(
+                f"[AdvNorm] step={step}: raw mean={mean:.4f}, std={std:.4f} "
+                f"-> norm mean={normalized.mean().item():.4f}, std={normalized.std().item():.4f}, "
+                f"clip=[-{clip_value},+{clip_value}]"
+            )
+        return normalized
+
+    def _get_advantage_normalization_cfg(self) -> dict[str, Any]:
+        try:
+            return getattr(self.config, "custom", {}).get("alpamayo", {}).get(
+                "advantage_normalization", {}
+            )
+        except (TypeError, AttributeError):
+            return {}
+
     def step_training(
         self,
         rollouts: List[Rollout],
@@ -153,6 +203,7 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         ]
 
         advantages_t = torch.tensor(advantages_list).to(self.device)
+        advantages_t = self._normalize_advantages(advantages_t, current_step)
         component_advantages_t = self._build_component_advantages(
             payloads_list,
             processed_samples,
@@ -402,10 +453,10 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                 report_data["train/grad_norm"] = grad_norm_sum.item()
                 report_data["train/local_loss"] = loss.item()
                 report_data["train/reward_mean"] = advantages_t.mean().item()
-                report_data["train/reward_std"] = advantages_t.std().item()
+                report_data["train/reward_std"] = advantages_t.std().item() if advantages_t.numel() > 1 else 0.0
                 for key, tensor in component_advantages_t.items():
                     report_data[f"train/advantage_{key}_mean"] = tensor.mean().item()
-                    report_data[f"train/advantage_{key}_std"] = tensor.std().item()
+                    report_data[f"train/advantage_{key}_std"] = tensor.std().item() if tensor.numel() > 1 else 0.0
                 print(f"[Step {current_step}] loss={loss.item():.6f}, reward={advantages_t.mean().item():.4f}, gn={grad_norm_sum.item():.4f}")
 
                 if self.config.logging.report_mfu:

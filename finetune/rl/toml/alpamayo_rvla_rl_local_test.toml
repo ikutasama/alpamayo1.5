@@ -51,10 +51,11 @@ n_generation = 6
 
 [rollout]
 backend = "reasoning_vla_vllm_rollout"
-gpu_memory_utilization = 0.7
+gpu_memory_utilization = 0.6
 enable_chunked_prefill = false
 n_generation = 12
 batch_size = 2
+n_generation_to_batch = true
 quantization = "none"
 seed = 42
 
@@ -63,7 +64,7 @@ temperature = 0.6
 top_p = 0.98
 repetition_penalty = 1
 # stop_strings = ["<|traj_future_end|>", "<|endoftext|>"]
-max_new_tokens = 256  # 由于不止是轨迹了，128个不够，cot+meta+traj，必须大于你的 action token 数量
+max_new_tokens = 256
 
 [policy]
 # ReasoningVLA HF checkpoint directory (must include ReasoningVLAConfig)
@@ -80,7 +81,7 @@ experiment_name = "RVLA_Post_Training"
 
 [train.train_policy]
 type = "grpo"
-trainer_type = "reasoning_vla_pgmo_grpo"
+trainer_type = "reasoning_vla_grpo"
 dataloader_shuffle = false
 dataset.split = "train"
 # Enable rank-based dispatch (mesh-rank sharding) so each replica consumes a stable shard.
@@ -135,13 +136,19 @@ comfort_weight = 0.1
 enable_hcc = true
 
 # Layer 2 weight: CoC reasoning quality (0.0-1.0, share of total reward)
-coc_quality_weight = 0.15
+coc_quality_weight = 0.40
 
 # Layer 3 weight: Reasoning-Action Alignment (0.0-1.0, share of total reward)
-raa_weight = 0.15
+raa_weight = 0.25
+
+# Layer 1 reward weight for additive formula (0.0-1.0)
+scene_reward_weight = 0.15
 
 # Layer 1 threshold: Scene understanding minimum score to pass gating
-scene_threshold = 0.3
+scene_threshold = 0.2
+
+# ADE threshold for trajectory quality (lower = more lenient)
+ade_threshold = 2.0
 
 # CoC dimension weights (factual, coherence, safety, completeness)
 # coc_dim_weights = { factual = 0.25, coherence = 0.30, safety = 0.25, completeness = 0.20 }
@@ -154,6 +161,13 @@ enable_consistency_reward = false
 consistency_weight = 0.0
 enable_risk_reward = false
 risk_weight = 0.0
+
+[custom.alpamayo.advantage_normalization]
+enable = true
+clip_value = 3.0
+use_running_stats = false
+ema_alpha = 0.99
+eps = 1e-8
 
 [custom.alpamayo.advantage_routing]
 enable = false

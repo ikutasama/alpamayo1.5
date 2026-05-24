@@ -169,7 +169,23 @@ class RLWrapperReasoningVLA(ReasoningVLA):
             labels = torch.where(labels_mask, labels, IGNORE_INDEX)
 
         # 3. vlm forward pass
-        outputs = self.vlm(input_ids=input_ids, labels=labels, **tokenized_data)
+        try:
+            outputs = self.vlm(input_ids=input_ids, labels=labels, **tokenized_data)
+        except ValueError as e:
+            import os
+            rank = os.environ.get("RANK", "?")
+            img_tok_id = None
+            if hasattr(self.vlm, "config") and hasattr(self.vlm.config, "image_token_id"):
+                img_tok_id = self.vlm.config.image_token_id
+                img_tok_count = (input_ids == img_tok_id).sum().item()
+            else:
+                img_tok_count = "N/A"
+            pv = tokenized_data.get("pixel_values")
+            gt = tokenized_data.get("image_grid_thw")
+            pv_shape = pv.shape if pv is not None and hasattr(pv, "shape") else type(pv)
+            gt_val = gt.tolist() if gt is not None and hasattr(gt, "tolist") else type(gt)
+            print(f"[DEBUG] Crash at rank={rank}: input_ids.shape={input_ids.shape}, image_pad_count={img_tok_count}, pixel_values={pv_shape}, image_grid_thw={gt_val}, keys={list(tokenized_data.keys())}")
+            raise
 
         losses = {}
         # Identify trajectory tokens (tokens between traj_future and next special token)

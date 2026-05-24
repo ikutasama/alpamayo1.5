@@ -174,8 +174,10 @@ def infer_trajectory_behavior(
 
     # Turning: cumulative heading change
     total_dh = dh.sum().item()
-    behaviors["turn_left"] = float(torch.sigmoid(total_dh * 5.0).item())
-    behaviors["turn_right"] = float(torch.sigmoid(-total_dh * 5.0).item())
+    dh_left = 1 / (1 + math.exp(-total_dh * 5.0))
+    dh_right = 1 / (1 + math.exp(total_dh * 5.0))
+    behaviors["turn_left"] = dh_left
+    behaviors["turn_right"] = dh_right
 
     # Lane change: lateral displacement
     total_dy = (predicted_xyz[-1, 1] - predicted_xyz[0, 1]).item()
