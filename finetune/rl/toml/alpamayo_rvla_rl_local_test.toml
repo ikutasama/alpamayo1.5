@@ -81,7 +81,7 @@ experiment_name = "RVLA_Post_Training"
 
 [train.train_policy]
 type = "grpo"
-trainer_type = "reasoning_vla_pgmo_grpo"
+trainer_type = "reasoning_vla_grpo"
 dataloader_shuffle = false
 dataset.split = "train"
 # Enable rank-based dispatch (mesh-rank sharding) so each replica consumes a stable shard.
@@ -179,7 +179,7 @@ fallback_weight = 0.5
 # ---- PGMO: Pareto-Guided Multi-Objective GRPO ----
 [custom.alpamayo.pgmo]
 # Master switch: enable PGMO-GRPO extensions
-enable = true
+enable = false
 
 # Pareto-optimal sample weighting (boost Pareto-frontier samples)
 enable_pareto_weighting = true

@@ -68,7 +68,7 @@ Use raw reward metrics to judge reward health. `advantage_mean/std` are normaliz
 
 `finetune/rl/toml/alpamayo_rvla_rl_local_test.toml` now defaults to:
 
-- `trainer_type = "reasoning_vla_pgmo_grpo"`
+- `trainer_type = "reasoning_vla_grpo"`
 - `kl_beta = 0.01`
 - rollout `temperature = 0.8`
 - rollout `top_p = 0.95`
@@ -77,7 +77,7 @@ Use raw reward metrics to judge reward health. `advantage_mean/std` are normaliz
 - `allowed_outdated_steps = 10`
 - token-level advantage routing enabled, with higher CoT weight.
 
-The entry script also auto-selects the PGMO trainer when `[custom.alpamayo.pgmo].enable = true`, unless `COSMOS_TRAINER_TYPE` is explicitly set.
+PGMO is kept as an optional ablation rather than the default first run. The local code registers `reasoning_vla_pgmo_grpo`, but the standard `reasoning_vla_grpo` trainer is the safer initial choice because it already applies token-level advantage routing to CoT, trajectory, and format tokens. To try PGMO later, set both `[train.train_policy].trainer_type = "reasoning_vla_pgmo_grpo"` and `[custom.alpamayo.pgmo].enable = true`.
 
 ## Recommended First Server Run
 
@@ -114,4 +114,3 @@ If trajectory quality drops while CoT improves:
 - increase `traj_l2_weight`,
 - lower `coc_quality_weight`,
 - raise `kl_beta` to `0.02`.
-
