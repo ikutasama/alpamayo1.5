@@ -243,14 +243,17 @@ def compute_raa_score(
     # Infer actual behavior from trajectory
     inferred = infer_trajectory_behavior(predicted_xyz, predicted_rot)
 
-    # Compute per-constraint alignment
+    # Compute per-constraint alignment. Empty/generic reasoning should not get
+    # a high alignment score simply because it did not commit to an action.
     alignments: dict[str, float] = {}
+    active_constraints = 0
     for key in weights:
         intended = constraints.get(key, 0.0)
         actual = inferred.get(key, 0.0)
         # Alignment = 1 - |intended - actual|, but only for constraints
         # that were actually intended (intended > 0.3 threshold)
         if intended > 0.3:
+            active_constraints += 1
             # For intended behaviors, we want actual to be high
             alignments[f"raa_{key}"] = 1.0 - abs(intended - max(actual, 0.0))
         else:
@@ -261,14 +264,22 @@ def compute_raa_score(
             else:
                 alignments[f"raa_{key}"] = 1.0
 
-    # Weighted aggregate
+    if active_constraints == 0:
+        alignments["raa_active_constraints"] = 0.0
+        alignments["raa_score"] = 0.15
+        return alignments
+
+    # Weighted aggregate over active constraints only. This makes RAA measure
+    # "did the trajectory follow the stated intent" instead of rewarding silence.
     weighted_sum = 0.0
     total_weight = 0.0
     for key, w in weights.items():
-        weighted_sum += w * alignments[f"raa_{key}"]
-        total_weight += w
-    aggregate = weighted_sum / total_weight if total_weight > 0 else 0.5
+        if constraints.get(key, 0.0) > 0.3:
+            weighted_sum += w * alignments[f"raa_{key}"]
+            total_weight += w
+    aggregate = weighted_sum / total_weight if total_weight > 0 else 0.15
 
+    alignments["raa_active_constraints"] = float(active_constraints)
     alignments["raa_score"] = float(max(0.0, min(1.0, aggregate)))
     return alignments
 

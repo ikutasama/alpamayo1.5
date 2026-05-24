@@ -60,11 +60,11 @@ quantization = "none"
 seed = 42
 
 [rollout.sampling_config]
-temperature = 0.6
-top_p = 0.98
-repetition_penalty = 1
+temperature = 0.8
+top_p = 0.95
+repetition_penalty = 1.05
 # stop_strings = ["<|traj_future_end|>", "<|endoftext|>"]
-max_new_tokens = 256
+max_new_tokens = 384
 
 [policy]
 # ReasoningVLA HF checkpoint directory (must include ReasoningVLAConfig)
@@ -81,7 +81,7 @@ experiment_name = "RVLA_Post_Training"
 
 [train.train_policy]
 type = "grpo"
-trainer_type = "reasoning_vla_grpo"
+trainer_type = "reasoning_vla_pgmo_grpo"
 dataloader_shuffle = false
 dataset.split = "train"
 # Enable rank-based dispatch (mesh-rank sharding) so each replica consumes a stable shard.
@@ -90,11 +90,11 @@ temperature = 1.0
 epsilon_low = 0.2
 epsilon_high = 0.28
 lower_bound_ratio = 10.0
-kl_beta = 0.0
+kl_beta = 0.01
 mu_iterations = 1
 mini_batch = 1
 min_filter_prefix_tokens = 1
-allowed_outdated_steps = 50
+allowed_outdated_steps = 10
 
 [train.ckpt]
 enable_checkpoint = true
@@ -170,11 +170,11 @@ ema_alpha = 0.99
 eps = 1e-8
 
 [custom.alpamayo.advantage_routing]
-enable = false
-coc_weight = 1.0
+enable = true
+coc_weight = 1.5
 traj_weight = 1.0
 format_weight = 0.2
-fallback_weight = 1.0
+fallback_weight = 0.5
 
 # ---- PGMO: Pareto-Guided Multi-Objective GRPO ----
 [custom.alpamayo.pgmo]

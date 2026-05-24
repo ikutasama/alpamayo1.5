@@ -85,6 +85,51 @@ def _normalize_grouped(
     return out
 
 
+def _rollout_train_diagnostics(
+    completions: list[str],
+    rewards: list[float],
+    reward_infos: list[Any],
+) -> dict[str, float]:
+    """Build raw reward and diversity diagnostics before advantage normalization."""
+    report: dict[str, float] = {}
+    if rewards:
+        rewards_np = np.array([float(r) for r in rewards], dtype=np.float32)
+        report["train/raw_reward_mean"] = float(rewards_np.mean())
+        report["train/raw_reward_std"] = float(rewards_np.std())
+        report["train/raw_reward_min"] = float(rewards_np.min())
+        report["train/raw_reward_max"] = float(rewards_np.max())
+
+    if completions:
+        normalized = [" ".join(str(c).split()) for c in completions]
+        report["train/unique_completion_ratio"] = len(set(normalized)) / max(1, len(normalized))
+        cot_word_counts = []
+        for text in completions:
+            cot = str(text).split("<|cot_end|>", maxsplit=1)[0]
+            cot_word_counts.append(len(cot.split()))
+        report["train/cot_word_count_mean"] = float(np.mean(cot_word_counts))
+        report["train/cot_word_count_min"] = float(np.min(cot_word_counts))
+
+    metric_keys = [
+        "scene_understanding",
+        "grounded_fact_score",
+        "grounded_fact_coverage",
+        "grounded_fact_contradictions",
+        "coc_quality",
+        "raa_score",
+        "raa_active_constraints",
+        "traj_L2",
+        "format_score",
+        "consistency_penalty",
+    ]
+    infos = [ri for ri in reward_infos if isinstance(ri, dict) and ri]
+    for key in metric_keys:
+        vals = [float(ri[key]) for ri in infos if key in ri]
+        if vals:
+            report[f"train/reward_{key}_mean"] = float(np.mean(vals))
+            report[f"train/reward_{key}_std"] = float(np.std(vals))
+    return report
+
+
 @TrainerRegistry.register(trainer_type="reasoning_vla_grpo")
 class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
     """GRPO trainer for reasoning VLA models."""
@@ -181,6 +226,16 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         payloads_list = [rollout.prompt for rollout in rollouts]
         completions_list = [rollout.completion for rollout in rollouts]
         advantages_list = [rollout.advantage for rollout in rollouts]
+        rewards_list_for_diag = [getattr(rollout, "reward", rollout.advantage) for rollout in rollouts]
+        reward_infos_for_diag = [getattr(rollout, "reward_info", {}) for rollout in rollouts]
+        has_reward_info_for_diag = any(
+            isinstance(ri, dict) and ri for ri in reward_infos_for_diag
+        )
+        rollout_diag = _rollout_train_diagnostics(
+            completions_list,
+            rewards_list_for_diag,
+            reward_infos_for_diag,
+        )
 
         pos_coef_global = self.config.train.train_policy.positive_nll_coef
         if pos_coef_global is not None and pos_coef_global > 0.0:
@@ -201,6 +256,19 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
             )
             for i in range(len(payloads_list))
         ]
+        if not has_reward_info_for_diag:
+            rollout_diag.update(
+                _rollout_train_diagnostics(
+                    completions_list,
+                    rewards_list_for_diag,
+                    [
+                        s.get("reward_components", {})
+                        if isinstance(s, dict)
+                        else {}
+                        for s in processed_samples
+                    ],
+                )
+            )
 
         advantages_t = torch.tensor(advantages_list).to(self.device)
         advantages_t = self._normalize_advantages(advantages_t, current_step)
@@ -452,12 +520,14 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                     report_data["train/kl_loss_max"] = global_max_kl_loss
                 report_data["train/grad_norm"] = grad_norm_sum.item()
                 report_data["train/local_loss"] = loss.item()
-                report_data["train/reward_mean"] = advantages_t.mean().item()
-                report_data["train/reward_std"] = advantages_t.std().item() if advantages_t.numel() > 1 else 0.0
+                report_data.update(rollout_diag)
+                report_data["train/advantage_mean"] = advantages_t.mean().item()
+                report_data["train/advantage_std"] = advantages_t.std().item() if advantages_t.numel() > 1 else 0.0
                 for key, tensor in component_advantages_t.items():
                     report_data[f"train/advantage_{key}_mean"] = tensor.mean().item()
                     report_data[f"train/advantage_{key}_std"] = tensor.std().item() if tensor.numel() > 1 else 0.0
-                print(f"[Step {current_step}] loss={loss.item():.6f}, reward={advantages_t.mean().item():.4f}, gn={grad_norm_sum.item():.4f}")
+                raw_reward = report_data.get("train/raw_reward_mean", float("nan"))
+                print(f"[Step {current_step}] loss={loss.item():.6f}, raw_reward={raw_reward:.4f}, adv={advantages_t.mean().item():.4f}, gn={grad_norm_sum.item():.4f}")
 
                 if self.config.logging.report_mfu:
                     mfu = compute_mfu(

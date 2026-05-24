@@ -12,6 +12,8 @@ from rl.models.reasoning_vla.data_packer import build_completion_token_masks
 from rl.models.reasoning_vla.trainer import _normalize_grouped
 from rl.rewards.coc_reward import compute_coc_reward, extract_coc_sections
 from rl.rewards.consistency_reward import compute_reasoning_action_consistency
+from rl.rewards.hcc_reward import _compute_grounded_fact_score
+from rl.rewards.raa_reward import compute_raa_score
 from rl.rewards.risk_reward import compute_risk_reward
 
 
@@ -77,3 +79,36 @@ def test_grouped_advantage_normalization_uses_prompt_groups() -> None:
     assert normalized[0] < 0.0
     assert normalized[1] > 0.0
     assert normalized[2] == fallback[2]
+
+
+def test_raa_does_not_reward_empty_intent() -> None:
+    predicted = torch.zeros((64, 3), dtype=torch.float32)
+    predicted[:, 0] = torch.linspace(0.0, 8.0, 64)
+    rot = torch.eye(3).repeat(64, 1, 1)
+
+    scores = compute_raa_score("The scene requires careful driving.", predicted, rot)
+
+    assert scores["raa_active_constraints"] == 0.0
+    assert scores["raa_score"] < 0.3
+
+
+def test_grounded_fact_score_prefers_matching_action_facts() -> None:
+    gt = torch.zeros((64, 3), dtype=torch.float32)
+    gt[:, 0] = torch.linspace(0.0, 8.0, 64)
+    rot = torch.eye(3).repeat(64, 1, 1)
+
+    good, good_info = _compute_grounded_fact_score(
+        "I observe the road ahead and will maintain a steady speed while keeping lane for safety.",
+        {},
+        gt,
+        rot,
+    )
+    bad, bad_info = _compute_grounded_fact_score(
+        "I will turn left and brake hard.",
+        {},
+        gt,
+        rot,
+    )
+
+    assert good > bad
+    assert good_info["grounded_fact_coverage"] > bad_info["grounded_fact_coverage"]

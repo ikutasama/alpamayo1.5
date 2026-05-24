@@ -27,10 +27,12 @@ This is the main entry point for HCC-RM reward computation.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 import torch
 
+from rl.rewards.coc_reward import extract_coc_sections
 from rl.rewards.coc_reward import compute_coc_quality
 
 _REQUIRED_HCC_KEYS: list[str] = [
@@ -103,6 +105,193 @@ def _compute_length_bonus(word_count: int) -> float:
     return 0.40
 
 
+_FACT_PATTERNS: dict[str, list[str]] = {
+    "decelerate": [
+        r"\bslow(?:ing)? down\b",
+        r"\bdecelerate\b",
+        r"\bbrak(?:e|ing)\b",
+        r"\breduce speed\b",
+        r"\byield\b",
+        r"\bstop(?:ping)?\b",
+    ],
+    "accelerate": [
+        r"\bspeed up\b",
+        r"\baccelerat(?:e|ing)\b",
+        r"\bincrease speed\b",
+        r"\bproceed\b",
+        r"\bmove forward\b",
+    ],
+    "maintain_speed": [
+        r"\bmaintain\b",
+        r"\bkeep\b",
+        r"\bsteady\b",
+        r"\bcontinue\b",
+        r"\bfollow\b",
+        r"\bconstant speed\b",
+    ],
+    "turn_left": [
+        r"\bturn left\b",
+        r"\bleft turn\b",
+        r"\bsteer left\b",
+        r"\bchange.*left\b",
+        r"\bshift.*left\b",
+    ],
+    "turn_right": [
+        r"\bturn right\b",
+        r"\bright turn\b",
+        r"\bsteer right\b",
+        r"\bchange.*right\b",
+        r"\bshift.*right\b",
+    ],
+    "straight": [
+        r"\bstraight\b",
+        r"\bkeep lane\b",
+        r"\bstay in lane\b",
+        r"\blane keeping\b",
+        r"\bmaintain lane\b",
+    ],
+    "scene_observation": [
+        r"\bobserve\b",
+        r"\bvisible\b",
+        r"\bscene\b",
+        r"\bcurrent(?:ly)?\b",
+        r"\bahead\b",
+        r"\bfront\b",
+        r"\blane\b",
+        r"\broad\b",
+    ],
+    "safety_rationale": [
+        r"\bsafe\b",
+        r"\brisk\b",
+        r"\bhazard\b",
+        r"\bcautious\b",
+        r"\bcollision\b",
+        r"\bdistance\b",
+        r"\bclearance\b",
+    ],
+}
+
+
+def _has_any(text_l: str, key: str) -> bool:
+    return any(re.search(pattern, text_l) for pattern in _FACT_PATTERNS[key])
+
+
+def _motion_profile(
+    xyz: torch.Tensor,
+    rot: torch.Tensor | None = None,
+) -> dict[str, float]:
+    """Summarize a trajectory into verifiable longitudinal/lateral facts."""
+    if xyz.dim() == 3:
+        xyz = xyz[0]
+    if rot is not None and rot.dim() == 4:
+        rot = rot[0]
+
+    if xyz.shape[0] < 2:
+        return {
+            "decelerate": 0.0,
+            "accelerate": 0.0,
+            "maintain_speed": 1.0,
+            "turn_left": 0.0,
+            "turn_right": 0.0,
+            "straight": 1.0,
+            "displacement": 0.0,
+            "lateral_delta": 0.0,
+        }
+
+    dxy = xyz[1:, :2] - xyz[:-1, :2]
+    speeds = torch.linalg.norm(dxy, dim=-1)
+    speed_start = speeds[: min(5, speeds.numel())].mean()
+    speed_end = speeds[-min(5, speeds.numel()) :].mean()
+    denom = torch.clamp(speed_start, min=0.1)
+    speed_change = float(((speed_end - speed_start) / denom).item())
+    displacement = float(torch.linalg.norm(xyz[-1, :2] - xyz[0, :2]).item())
+    lateral_delta = float((xyz[-1, 1] - xyz[0, 1]).item())
+
+    heading_delta = 0.0
+    if rot is not None and rot.numel() > 0:
+        heading = torch.atan2(rot[..., 1, 0], rot[..., 0, 0])
+        dh = heading[-1] - heading[0]
+        heading_delta = float(torch.atan2(torch.sin(dh), torch.cos(dh)).item())
+
+    abs_lat = abs(lateral_delta)
+    abs_heading = abs(heading_delta)
+    return {
+        "decelerate": float(speed_change < -0.12 or speed_end.item() < 0.25),
+        "accelerate": float(speed_change > 0.12),
+        "maintain_speed": float(abs(speed_change) <= 0.18 and speed_end.item() >= 0.25),
+        "turn_left": float(lateral_delta < -0.6 or heading_delta > 0.18),
+        "turn_right": float(lateral_delta > 0.6 or heading_delta < -0.18),
+        "straight": float(abs_lat <= 0.8 and abs_heading <= 0.22),
+        "displacement": displacement,
+        "lateral_delta": lateral_delta,
+        "speed_change": speed_change,
+    }
+
+
+def _compute_grounded_fact_score(
+    coc_text: str,
+    reference: dict[str, Any],
+    gt_future_xyz: torch.Tensor,
+    gt_future_rot: torch.Tensor | None,
+) -> tuple[float, dict[str, float]]:
+    """Reward CoT facts that are checkable from the current sample.
+
+    This intentionally avoids rewarding length. It scores whether the CoT
+    mentions the ego future behavior and available road/scene facts in a way
+    that can be verified from labels or metadata.
+    """
+    text_l = coc_text.lower()
+    profile = _motion_profile(gt_future_xyz, gt_future_rot)
+
+    expected: list[tuple[str, float]] = []
+    for key in ("decelerate", "accelerate", "maintain_speed", "turn_left", "turn_right", "straight"):
+        if profile.get(key, 0.0) > 0.5:
+            expected.append((key, 1.0))
+
+    # Always require some explicit scene/risk grounding. If map/road geometry is
+    # available in the sample, lane/road mentions become directly checkable.
+    expected.append(("scene_observation", 0.6))
+    if reference.get("egomotion_lanelines", None) is not None or reference.get(
+        "egomotion_road_boundaries", None
+    ) is not None:
+        expected.append(("scene_observation", 0.4))
+    expected.append(("safety_rationale", 0.5))
+
+    total_w = sum(w for _, w in expected) or 1.0
+    matched_w = sum(w for key, w in expected if _has_any(text_l, key))
+    coverage = matched_w / total_w
+
+    # Penalize unsupported directional/action claims. The trajectory reward still
+    # anchors to GT; this prevents CoT from saying "left" while the sample is right.
+    contradictions = 0.0
+    opposing = (("turn_left", "turn_right"), ("accelerate", "decelerate"))
+    for pos, neg in opposing:
+        if _has_any(text_l, pos) and profile.get(pos, 0.0) < 0.5 and profile.get(neg, 0.0) > 0.5:
+            contradictions += 1.0
+        if _has_any(text_l, neg) and profile.get(neg, 0.0) < 0.5 and profile.get(pos, 0.0) > 0.5:
+            contradictions += 1.0
+    if profile.get("straight", 0.0) > 0.5:
+        contradictions += float(_has_any(text_l, "turn_left"))
+        contradictions += float(_has_any(text_l, "turn_right"))
+    if profile.get("maintain_speed", 0.0) > 0.5:
+        contradictions += float(_has_any(text_l, "accelerate"))
+        contradictions += float(_has_any(text_l, "decelerate"))
+    contradiction_penalty = min(0.35, contradictions * 0.18)
+    score = max(0.0, min(1.0, coverage - contradiction_penalty))
+
+    return score, {
+        "grounded_fact_score": float(score),
+        "grounded_fact_coverage": float(coverage),
+        "grounded_fact_contradictions": float(contradictions),
+        "gt_decelerate": float(profile.get("decelerate", 0.0)),
+        "gt_accelerate": float(profile.get("accelerate", 0.0)),
+        "gt_maintain_speed": float(profile.get("maintain_speed", 0.0)),
+        "gt_turn_left": float(profile.get("turn_left", 0.0)),
+        "gt_turn_right": float(profile.get("turn_right", 0.0)),
+        "gt_straight": float(profile.get("straight", 0.0)),
+    }
+
+
 def _check_coc_traj_consistency(
     coc_text: str,
     predicted_fut_xyz: torch.Tensor,
@@ -168,7 +357,7 @@ def _check_coc_traj_consistency(
     if coc_lat_right > 0.3 and traj_lat_left > 0.3:
         violations += 1.0
 
-    return -min(0.15, violations * 0.05)
+    return -min(0.20, violations * 0.08)
 
 
 def compute_hcc_reward(
@@ -225,52 +414,33 @@ def compute_hcc_reward(
     )
 
     # ============================================================
-    # Layer 1: Scene Understanding (Factual Accuracy Gating)
+    # Layer 1: Grounded Scene Facts (no hard length gate)
     # ============================================================
     coc_scores = compute_coc_quality(to_be_evaluated, weights=w.get("coc_weights"))
+    sections = extract_coc_sections(to_be_evaluated)
 
-    _coc_text = to_be_evaluated.split("<|cot_end|>")[0].strip() if "<|cot_end|>" in to_be_evaluated else to_be_evaluated.strip()
+    _coc_text = str(sections["reasoning"]).strip()
     _word_count = len(_coc_text.split())
 
     print(f"\n[CoC-Debug] word_count={_word_count} factual={coc_scores.get('coc_factual',0):.3f} coherence={coc_scores.get('coc_coherence',0):.3f} safety={coc_scores.get('coc_safety',0):.3f} completeness={coc_scores.get('coc_completeness',0):.3f}\n{_coc_text[:600]}\n[CoC-Debug-End]", flush=True)
 
-    length_bonus = _compute_length_bonus(_word_count)
     consistency_penalty = _check_coc_traj_consistency(
         _coc_text, predicted_fut_xyz[0], predicted_fut_rot[0]
     )
+    format_score = float(sections.get("format_score", 0.0))
+    ego_future_rot = reference.get("ego_future_rot", None)
+    gt_future_for_facts = gt_fut_xyz[0] if gt_fut_xyz.dim() == 3 else gt_fut_xyz
+    gt_rot_for_facts = None
+    if isinstance(ego_future_rot, torch.Tensor):
+        gt_rot_for_facts = ego_future_rot[0] if ego_future_rot.dim() == 4 else ego_future_rot
+    grounded_fact_score, grounded_info = _compute_grounded_fact_score(
+        _coc_text,
+        reference,
+        gt_future_for_facts,
+        gt_rot_for_facts,
+    )
 
-    if _word_count < 10:
-        coc_scores = {
-            "coc_factual": 0.0,
-            "coc_coherence": 0.0,
-            "coc_safety": 0.0,
-            "coc_completeness": 0.0,
-            "coc_quality": 0.0,
-        }
-
-    s1_scene = coc_scores["coc_factual"]
-
-    scene_threshold = w["scene_threshold"]
-    if s1_scene < scene_threshold:
-        logger.debug(
-            f"[HCC-RM] Scene understanding below threshold "
-            f"({s1_scene:.3f} < {scene_threshold:.3f}), reward clamped to -1.0"
-        )
-        reward_dict = {
-            "scene_understanding": float(s1_scene),
-            "coc_quality": float(coc_scores.get("coc_quality", 0.0)),
-            "coc_factual": float(coc_scores.get("coc_factual", 0.0)),
-            "coc_coherence": float(coc_scores.get("coc_coherence", 0.0)),
-            "coc_safety": float(coc_scores.get("coc_safety", 0.0)),
-            "coc_completeness": float(coc_scores.get("coc_completeness", 0.0)),
-            "raa_score": 0.0,
-            "traj_L2": 999.0,
-            "comfort_reward": 0.0,
-            "reward": -1.0,
-            "length_bonus": float(length_bonus),
-            "consistency_penalty": float(consistency_penalty),
-        }
-        return -1.0, reward_dict
+    s1_scene = 0.45 * coc_scores["coc_factual"] + 0.55 * grounded_fact_score
 
     # ============================================================
     # Layer 2: Causal Coherence (Reasoning Quality)
@@ -292,7 +462,7 @@ def compute_hcc_reward(
     raa_reward_val, raa_info = compute_raa_reward(
         to_be_evaluated, predicted_fut_xyz, predicted_fut_rot, weight=1.0
     )
-    s3_raa = raa_reward_val  # Already in [0, 1], but can be low
+    s3_raa = raa_reward_val  # Already in [0, 1], low for empty/generic intent.
     s3_raa_normalized = 2.0 * s3_raa - 1.0  # [0,1] → [-1,1]
 
     # ============================================================
@@ -333,12 +503,13 @@ def compute_hcc_reward(
     scene_w = w.get("scene_reward_weight", 0.3)
     traj_layer_w = max(0.0, 1.0 - scene_w - coc_w - raa_w)
 
+    format_w = 0.05
     final_reward = (
-        scene_w * s1_scene
+        scene_w * (2.0 * s1_scene - 1.0)
         + coc_w * s2_coc_normalized
         + raa_w * s3_raa_normalized
         + traj_layer_w * s4_combined
-        + length_bonus
+        + format_w * (2.0 * format_score - 1.0)
         + consistency_penalty
     )
 
@@ -352,7 +523,8 @@ def compute_hcc_reward(
         f"[HCC-RM] s1(scene)={s1_scene:.3f} s2(coc)={s2_coc_normalized:.3f} "
         f"s3(raa)={s3_raa_normalized:.3f} s4(traj)={s4_combined:.3f} "
         f"s4_l2={l2_dist:.3f} s4_comf={comfort_score:.3f} "
-        f"len_bonus={length_bonus:.3f} cons_pen={consistency_penalty:.3f} "
+        f"facts={grounded_fact_score:.3f} fmt={format_score:.3f} "
+        f"cons_pen={consistency_penalty:.3f} "
         f"R_final={final_reward:.4f}"
     )
 
@@ -363,12 +535,14 @@ def compute_hcc_reward(
         "coc_coherence": float(coc_scores.get("coc_coherence", 0.0)),
         "coc_safety": float(coc_scores.get("coc_safety", 0.0)),
         "coc_completeness": float(coc_scores.get("coc_completeness", 0.0)),
+        "format_score": float(format_score),
+        "cot_word_count": float(_word_count),
         "raa_score": float(s3_raa),
         "traj_L2": float(l2_dist),
         "comfort_reward": float(comfort_score),
         "reward": float(final_reward),
-        "length_bonus": float(length_bonus),
         "consistency_penalty": float(consistency_penalty),
+        **grounded_info,
         **{
             k: float(v) if isinstance(v, (float, int)) else 0.0
             for k, v in raa_info.items()

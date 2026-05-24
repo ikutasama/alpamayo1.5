@@ -31,6 +31,8 @@ PGMO-GRPO is enabled when ``[custom.alpamayo.pgmo].enable`` is true in TOML.
 # ruff: noqa: E402
 
 import os
+import sys
+import tomllib
 
 
 os.environ.setdefault("COSMOS_HEARTBEAT_TIMEOUT", "600")
@@ -84,6 +86,24 @@ def _is_pgmo_enabled(config) -> bool:
         return False
 
 
+def _is_pgmo_enabled_from_toml() -> bool:
+    """Read the launch TOML directly so the entry follows the user's config."""
+    toml_path = None
+    for i, arg in enumerate(sys.argv):
+        if arg == "--config" and i + 1 < len(sys.argv):
+            toml_path = sys.argv[i + 1]
+            break
+    if not toml_path:
+        return False
+    try:
+        with open(toml_path, "rb") as f:
+            cfg = tomllib.load(f)
+        return bool(cfg.get("custom", {}).get("alpamayo", {}).get("pgmo", {}).get("enable", False))
+    except Exception as e:
+        logger.warning(f"Failed to read PGMO switch from {toml_path}: {e}")
+        return False
+
+
 def _reasoning_vla_reward_fn(to_be_evaluated, reference=None, *args, config=None, **kwargs):
     """Compute aggregated reward for a single ReasoningVLA rollout.
 
@@ -110,9 +130,9 @@ def _reasoning_vla_reward_fn(to_be_evaluated, reference=None, *args, config=None
 # Build ModelSpec with PGMO support
 # The trainer_type is set to "reasoning_vla_grpo" by default.
 # Set COSMOS_TRAINER_TYPE=reasoning_vla_pgmo_grpo to use PGMO.
-_trainer_type = os.environ.get(
-    "COSMOS_TRAINER_TYPE", "reasoning_vla_grpo"
-)
+_trainer_type = os.environ.get("COSMOS_TRAINER_TYPE")
+if not _trainer_type:
+    _trainer_type = "reasoning_vla_pgmo_grpo" if _is_pgmo_enabled_from_toml() else "reasoning_vla_grpo"
 
 REASONING_VLA_SPEC = ModelSpec(
     cosmos_wrapper=RVLACosmos,

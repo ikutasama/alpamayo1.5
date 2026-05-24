@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import re
 import time
 from typing import List, Optional
 
@@ -35,6 +36,24 @@ from vllm import SamplingParams
 from vllm.entrypoints.llm import LLM
 
 from alpamayo1_5.models.base_model import SPECIAL_TOKENS
+
+
+def _extract_rollout_cot(text: str) -> str:
+    if SPECIAL_TOKENS["cot_end"] in text:
+        return text.split(SPECIAL_TOKENS["cot_end"], maxsplit=1)[0]
+    if SPECIAL_TOKENS["traj_future_start"] in text:
+        return text.split(SPECIAL_TOKENS["traj_future_start"], maxsplit=1)[0]
+    return text
+
+
+def _completion_diversity(texts: list[str]) -> float:
+    if not texts:
+        return 0.0
+    normalized = [
+        re.sub(r"\s+", " ", t.replace(SPECIAL_TOKENS["traj_future_end"], "")).strip()
+        for t in texts
+    ]
+    return len(set(normalized)) / max(1, len(normalized))
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
@@ -405,6 +424,45 @@ class ReasoningVlaVllmRollout(RolloutBase):
                     token_ids = getattr(out, "token_ids", None)
                     if token_ids is not None:
                         total_generated_tokens += len(token_ids)
+
+            try:
+                diversity = [_completion_diversity(row) for row in response]
+                cot_word_counts = [
+                    len(_extract_rollout_cot(text).split())
+                    for row in response
+                    for text in row
+                    if text
+                ]
+                format_ok = [
+                    float(
+                        SPECIAL_TOKENS["cot_end"] in text
+                        and SPECIAL_TOKENS["traj_future_start"] in text
+                    )
+                    for row in response
+                    for text in row
+                ]
+                if diversity:
+                    logger.warning(
+                        {
+                            "rollout_generation_diagnostics": {
+                                "unique_completion_ratio_mean": round(
+                                    sum(diversity) / len(diversity), 4
+                                ),
+                                "unique_completion_ratio_min": round(min(diversity), 4),
+                                "cot_word_count_mean": round(
+                                    sum(cot_word_counts) / max(1, len(cot_word_counts)), 3
+                                ),
+                                "cot_word_count_min": min(cot_word_counts)
+                                if cot_word_counts
+                                else 0,
+                                "format_ok_rate": round(
+                                    sum(format_ok) / max(1, len(format_ok)), 4
+                                ),
+                            }
+                        }
+                    )
+            except Exception:
+                pass
 
             valid_completions: List[List[str]] = []
             valid_logprobs: List[List[float]] = []

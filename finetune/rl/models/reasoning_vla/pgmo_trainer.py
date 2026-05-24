@@ -43,6 +43,7 @@ from cosmos_rl.utils.util import compute_mfu, is_master_rank
 from torch.utils.tensorboard import SummaryWriter
 
 from rl.base_trainer import AlpamayoGRPOTrainer
+from rl.models.reasoning_vla.trainer import _rollout_train_diagnostics
 
 for _logger_name in ["cosmos", "cosmos_rl", "vllm", "transformers"]:
     _l = logging.getLogger(_logger_name)
@@ -197,6 +198,12 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
         reward_infos = [
             getattr(rollout, "reward_info", {}) for rollout in rollouts
         ]
+        has_reward_info_for_diag = any(isinstance(ri, dict) and ri for ri in reward_infos)
+        rollout_diag = _rollout_train_diagnostics(
+            completions_list,
+            rewards_list,
+            reward_infos,
+        )
 
         if (
             self._pgmo_cfg["enable_pareto_weighting"]
@@ -297,6 +304,19 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
             )
             for i in range(len(payloads_list))
         ]
+        if not has_reward_info_for_diag:
+            rollout_diag.update(
+                _rollout_train_diagnostics(
+                    completions_list,
+                    rewards_list,
+                    [
+                        s.get("reward_components", {})
+                        if isinstance(s, dict)
+                        else {}
+                        for s in processed_samples
+                    ],
+                )
+            )
 
         # ---- Training loop ----
         batch_size = len(rollouts)
@@ -615,14 +635,17 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
                     report_data["train/kl_loss_max"] = global_max_kl_loss
                 report_data["train/grad_norm"] = grad_norm_sum.item()
                 report_data["train/local_loss"] = loss.item()
-                report_data["train/reward_mean"] = advantages_t.mean().item()
-                report_data["train/reward_std"] = advantages_t.std().item() if advantages_t.numel() > 1 else 0.0
+                report_data.update(rollout_diag)
+                report_data["train/advantage_mean"] = advantages_t.mean().item()
+                report_data["train/advantage_std"] = advantages_t.std().item() if advantages_t.numel() > 1 else 0.0
                 if self._pgmo_cfg["enable_contrastive"]:
                     report_data["train/contrastive_loss"] = contrastive_loss_avg
 
+                raw_reward = report_data.get("train/raw_reward_mean", float("nan"))
                 print(
                     f"[Step {current_step}] loss={loss.item():.6f}, "
-                    f"reward={advantages_t.mean().item():.4f}, "
+                    f"raw_reward={raw_reward:.4f}, "
+                    f"adv={advantages_t.mean().item():.4f}, "
                     f"gn={grad_norm_sum.item():.4f}"
                     + (
                         f", c_loss={contrastive_loss_avg:.6f}"
