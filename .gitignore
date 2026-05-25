@@ -215,6 +215,19 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# 屏蔽不必要输出
 outputs/
-output_stage1/*
+output_stage*/
+temp_model/
+output_rl/
+torchelastic/
+
+# 或者更通用的做法：屏蔽所有以 checkpoint- 开头的文件夹
+**/checkpoint-*/
+
+# 专门屏蔽大文件格式
+*.safetensors
+*.pth
+*.bin
+*.pt
 .pdf
