@@ -18,10 +18,138 @@
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import physical_ai_av
 import scipy.spatial.transform as spt
 import torch
 from einops import rearrange
+
+
+def _load_obstacle_data(
+    avdi: physical_ai_av.PhysicalAIAVDatasetInterface,
+    clip_id: str,
+    t0_us: int,
+    num_history_steps: int,
+    num_future_steps: int,
+    time_step: float,
+    maybe_stream: bool = True,
+) -> dict[str, Any] | None:
+    """Load obstacle.offline data for a clip and extract obstacle info around t0.
+
+    Returns a dict with obstacle type labels, positions (relative to ego at t0),
+    and distances. Returns None if obstacle data is not available.
+    """
+    try:
+        obstacle_feature = avdi.features.LABELS.OBSTACLE_OFFLINE
+    except (AttributeError, KeyError):
+        # Fallback: try string-based feature name
+        obstacle_feature = "obstacle.offline"
+
+    obstacle_data = avdi.get_clip_feature(clip_id, obstacle_feature, maybe_stream=maybe_stream)
+    if obstacle_data is None:
+        return None
+
+    # obstacle_data is a dict of {key: parquet_df} from the zip reader
+    obstacle_parquet = None
+    if isinstance(obstacle_data, dict):
+        for k, v in obstacle_data.items():
+            if isinstance(v, pd.DataFrame) and "obstacle" in k.lower():
+                obstacle_parquet = v
+                break
+        if obstacle_parquet is None:
+            # Try the first parquet value
+            for v in obstacle_data.values():
+                if isinstance(v, pd.DataFrame):
+                    obstacle_parquet = v
+                    break
+    elif isinstance(obstacle_data, pd.DataFrame):
+        obstacle_parquet = obstacle_data
+
+    if obstacle_parquet is None:
+        return None
+
+    # Extract obstacle info around the t0 timestamp
+    # Typical columns in obstacle.offline parquet:
+    #   timestamp, label (obstacle type), x, y, z (positions relative to some frame),
+    #   width, length, height, heading, speed, etc.
+    result = {
+        "obstacle_types": [],    # List of obstacle type strings near ego
+        "obstacle_positions": [],  # List of [x, y] positions relative to ego at t0
+        "obstacle_distances": [],  # List of distances from ego
+        "obstacle_labels_raw": [],  # Raw label strings from parquet
+    }
+
+    if "timestamp" in obstacle_parquet.columns:
+        # Get obstacles around t0 timestamp (within history + future window)
+        time_window_us = num_future_steps * time_step * 1_000_000
+        t_start = t0_us - num_history_steps * time_step * 1_000_000
+        t_end = t0_us + time_window_us
+        near_obstacles = obstacle_parquet[
+            (obstacle_parquet["timestamp"] >= t_start) &
+            (obstacle_parquet["timestamp"] <= t_end)
+        ]
+    else:
+        near_obstacles = obstacle_parquet
+
+    if len(near_obstacles) == 0:
+        return result  # Return empty but valid structure
+
+    label_col = None
+    for candidate in ["label", "type", "category", "object_type", "class_name"]:
+        if candidate in near_obstacles.columns:
+            label_col = candidate
+            break
+
+    # Extract positions
+    x_col = None
+    y_col = None
+    for candidate_x in ["x", "position_x", "cx", "center_x"]:
+        if candidate_x in near_obstacles.columns:
+            x_col = candidate_x
+            break
+    for candidate_y in ["y", "position_y", "cy", "center_y"]:
+        if candidate_y in near_obstacles.columns:
+            y_col = candidate_y
+            break
+
+    for _, row in near_obstacles.iterrows():
+        obs_label = str(row.get(label_col, "unknown")) if label_col else "unknown"
+        result["obstacle_labels_raw"].append(obs_label)
+
+        # Normalize obstacle type to our categories
+        obs_type = _normalize_obstacle_type(obs_label)
+        result["obstacle_types"].append(obs_type)
+
+        if x_col and y_col:
+            ox = float(row[x_col])
+            oy = float(row[y_col])
+            result["obstacle_positions"].append([ox, oy])
+            # Distance from ego (which is at origin in local frame)
+            dist = np.sqrt(ox**2 + oy**2)
+            result["obstacle_distances"].append(dist)
+        else:
+            result["obstacle_positions"].append([0.0, 0.0])
+            result["obstacle_distances"].append(999.0)
+
+    return result
+
+
+def _normalize_obstacle_type(label: str) -> str:
+    """Normalize raw obstacle label to a standard category."""
+    label_l = label.lower()
+    if any(w in label_l for w in ["pedestrian", "person", "walker"]):
+        return "pedestrian"
+    if any(w in label_l for w in ["cyclist", "bicycle", "bike", "motorcycle"]):
+        return "cyclist"
+    if any(w in label_l for w in ["car", "sedan", "hatchback", "coupe"]):
+        return "car"
+    if any(w in label_l for w in ["truck", "van", "bus", "semi", "trailer"]):
+        return "truck"
+    if any(w in label_l for w in ["barrier", "cone", "block", "construction"]):
+        return "barrier"
+    if any(w in label_l for w in ["animal", "dog"]):
+        return "animal"
+    return "vehicle"  # Generic fallback
 
 
 def load_physical_aiavdataset(
@@ -34,6 +162,7 @@ def load_physical_aiavdataset(
     time_step: float = 0.1,
     camera_features: list | None = None,
     num_frames: int = 4,
+    load_obstacles: bool = False,
 ) -> dict[str, Any]:
     """Load data from physical_ai_av for model inference.
 
@@ -208,7 +337,7 @@ def load_physical_aiavdataset(
     camera_tmin = all_timestamps.min()
     relative_timestamps = (all_timestamps - camera_tmin).float() * 1e-6  # (N_cameras, num_frames)
 
-    return {
+    result = {
         "image_frames": image_frames,  # (N_cameras, num_frames, 3, H, W)
         "camera_indices": camera_indices,  # (N_cameras,)
         "ego_history_xyz": ego_history_xyz_tensor,  # (1, 1, num_history_steps, 3)
@@ -220,3 +349,16 @@ def load_physical_aiavdataset(
         "t0_us": t0_us,
         "clip_id": clip_id,
     }
+
+    if load_obstacles:
+        obstacle_info = _load_obstacle_data(
+            avdi, clip_id, t0_us,
+            num_history_steps=num_history_steps,
+            num_future_steps=num_future_steps,
+            time_step=time_step,
+            maybe_stream=maybe_stream,
+        )
+        if obstacle_info is not None:
+            result["obstacle_info"] = obstacle_info
+
+    return result

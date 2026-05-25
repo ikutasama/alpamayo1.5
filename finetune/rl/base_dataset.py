@@ -10,7 +10,7 @@
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
+# See the License for the specific governing permissions and
 # limitations under the License.
 
 """Cosmos-RL dataset wrapper for Alpamayo models."""
@@ -67,7 +67,7 @@ class AlpamayoCosmosDataset(Dataset):
             return {}
         if not isinstance(sample, dict) or "ego_future_xyz" not in sample:
             return {}
-        return {
+        ref = {
             "ego_future_xyz": sample["ego_future_xyz"],
             "ego_future_rot": sample["ego_future_rot"],
             "ego_history_xyz": sample["ego_history_xyz"],
@@ -78,5 +78,7 @@ class AlpamayoCosmosDataset(Dataset):
             "ego_length_offset": sample.get("ego_length_offset", None),
             "obstacle_bbox_history": sample.get("obstacle_bbox_history", None),
             "obstacle_bbox_future": sample.get("obstacle_bbox_future", None),
+            "obstacle_info": sample.get("obstacle_info", None),
             "cot": sample.get("cot", ""),
         }
+        return ref

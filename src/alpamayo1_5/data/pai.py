@@ -42,6 +42,7 @@ class PAIDataset(Dataset):
         num_history_steps: int = 16,
         num_future_steps: int = 64,
         time_step: float = 0.1,
+        load_obstacles: bool = False,
     ):
         """Initialize dataset.
 
@@ -79,6 +80,7 @@ class PAIDataset(Dataset):
         self.num_history_steps = num_history_steps
         self.num_future_steps = num_future_steps
         self.time_step = time_step
+        self.load_obstacles = load_obstacles
 
         self.vla_preprocess_func = None
         if model_config is not None and isinstance(model_config, dict):
@@ -110,6 +112,7 @@ class PAIDataset(Dataset):
             num_history_steps=self.num_history_steps,
             num_future_steps=self.num_future_steps,
             time_step=self.time_step,
+            load_obstacles=self.load_obstacles,
         )
 
         # squeeze ego motion shape

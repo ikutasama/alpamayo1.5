@@ -13,15 +13,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Hierarchical Causal-Consistent Reward Model (HCC-RM).
+"""Hierarchical Causal-Consistent Reward Model (HCC-RM) v2 — Grounded Edition.
 
-Aggregates four layers of reward signals into a single scalar reward:
-  Layer 1 — Scene Understanding (factual accuracy gating)
-  Layer 2 — Causal Coherence (reasoning quality)
-  Layer 3 — Reasoning-Action Alignment (trajectory follows reasoning?)
-  Layer 4 — Trajectory Quality (ADE + comfort)
+This is a major revision that fixes the two core problems identified in v1:
+  1. COT套模板 (template-hacking) — regex keyword rewards allowed the model
+     to score high by outputting generic template phrases containing keywords
+     like "vehicle", "hazard", "slow down" without grounding them to the scene.
+  2. reward不增加 (reward variance collapse) — all GRPO group members output
+     similar template text, getting nearly identical regex scores, making
+     advantage≈0 and killing gradient signal.
 
-This is the main entry point for HCC-RM reward computation.
+Key changes in v2:
+  - Replaces regex-based CoC quality scoring (factual_accuracy, coherence,
+    safety, completeness) with grounded checks against GT obstacle data and
+    GT trajectory decisions.
+  - Obstacle grounding reward: checks if COT mentions obstacle types/directions
+    that match actual GT obstacles in the scene. Template "vehicle ahead" gets
+    low score when GT obstacle is a pedestrian crossing.
+  - Decision consistency reward: checks if COT decision (stop/yield/nudge/
+    maintain/accelerate/turn) matches the actual GT trajectory behavior.
+    Template "maintain lane" scores ~0 when GT is yielding.
+  - These grounded rewards create variance because different rollouts produce
+    different obstacle descriptions and decision claims with different accuracy.
+  - Trajectory quality remains as the baseline L2+comfort reward.
+
+Layer structure:
+  R = w_scene * grounded_scene + w_decision * decision_consistency
+      + w_traj * trajectory_quality + w_format * format_score
+      + consistency_penalty
+
+  All additive, no hard gate (the gate caused reward clipping issues).
 """
 
 from __future__ import annotations
@@ -32,8 +53,7 @@ from typing import Any
 
 import torch
 
-from rl.rewards.coc_reward import extract_coc_sections
-from rl.rewards.coc_reward import compute_coc_quality
+from rl.rewards.coc_reward import extract_coc_sections, extract_coc_text
 
 _REQUIRED_HCC_KEYS: list[str] = [
     "traj_l2_weight",
@@ -44,17 +64,7 @@ _REQUIRED_HCC_KEYS: list[str] = [
 
 
 def _get_hcc_cfg(config: object | None) -> dict[str, float]:
-    """Extract HCC-RM parameters from Cosmos TOML [custom.alpamayo.reward].
-
-    Args:
-        config: Cosmos-RL config object with TOML settings.
-
-    Returns:
-        Dict with reward weights and thresholds.
-
-    Raises:
-        ValueError: If required keys are missing.
-    """
+    """Extract HCC-RM parameters from Cosmos TOML [custom.alpamayo.reward]."""
     try:
         reward_cfg = getattr(config, "custom")["alpamayo"]["reward"]
     except (TypeError, KeyError, AttributeError) as e:
@@ -77,97 +87,46 @@ def _get_hcc_cfg(config: object | None) -> dict[str, float]:
         "scene_threshold": float(reward_cfg.get("scene_threshold", 0.3)),
         "ade_threshold": float(reward_cfg.get("ade_threshold", 3.0)),
         "coc_weights": reward_cfg.get("coc_dim_weights", None),
+        "obstacle_grounding_weight": float(reward_cfg.get("obstacle_grounding_weight", 0.25)),
+        "decision_consistency_weight": float(reward_cfg.get("decision_consistency_weight", 0.30)),
     }
 
 
-def _compute_length_bonus(word_count: int) -> float:
-    """Compute CoC length bonus/penalty to encourage 20-40 words.
-
-    Args:
-        word_count: Number of words in the CoC text.
-
-    Returns:
-        Bonus in [-0.40, +0.50]. Positive for >=20 words, negative for shorter.
-    """
-    if word_count < 10:
-        return -0.40
-    if word_count < 15:
-        t = (word_count - 10.0) / 5.0
-        return -0.40 + t * 0.60
-    if word_count < 25:
-        t = (word_count - 15.0) / 10.0
-        return 0.20 + t * 0.30
-    if word_count <= 40:
-        t = (word_count - 25.0) / 15.0
-        return 0.50 - 0.10 * t
-    if word_count <= 60:
-        return 0.40
-    return 0.40
-
-
+# ---------------------------------------------------------------------------
+# Lightweight motion profile (reused from v1, unchanged)
+# ---------------------------------------------------------------------------
 _FACT_PATTERNS: dict[str, list[str]] = {
     "decelerate": [
-        r"\bslow(?:ing)? down\b",
-        r"\bdecelerate\b",
-        r"\bbrak(?:e|ing)\b",
-        r"\breduce speed\b",
-        r"\byield\b",
-        r"\bstop(?:ping)?\b",
+        r"\bslow(?:ing)? down\b", r"\bdecelerate\b", r"\bbrak(?:e|ing)\b",
+        r"\breduce speed\b", r"\byield\b", r"\bstop(?:ping)?\b",
     ],
     "accelerate": [
-        r"\bspeed up\b",
-        r"\baccelerat(?:e|ing)\b",
-        r"\bincrease speed\b",
-        r"\bproceed\b",
-        r"\bmove forward\b",
+        r"\bspeed up\b", r"\baccelerat(?:e|ing)\b", r"\bincrease speed\b",
+        r"\bproceed\b", r"\bmove forward\b",
     ],
     "maintain_speed": [
-        r"\bmaintain\b",
-        r"\bkeep\b",
-        r"\bsteady\b",
-        r"\bcontinue\b",
-        r"\bfollow\b",
-        r"\bconstant speed\b",
+        r"\bmaintain\b", r"\bkeep\b", r"\bsteady\b", r"\bcontinue\b",
+        r"\bfollow\b", r"\bconstant speed\b",
     ],
     "turn_left": [
-        r"\bturn left\b",
-        r"\bleft turn\b",
-        r"\bsteer left\b",
-        r"\bchange.*left\b",
-        r"\bshift.*left\b",
+        r"\bturn left\b", r"\bleft turn\b", r"\bsteer left\b",
+        r"\bchange.*left\b", r"\bshift.*left\b",
     ],
     "turn_right": [
-        r"\bturn right\b",
-        r"\bright turn\b",
-        r"\bsteer right\b",
-        r"\bchange.*right\b",
-        r"\bshift.*right\b",
+        r"\bturn right\b", r"\bright turn\b", r"\bsteer right\b",
+        r"\bchange.*right\b", r"\bshift.*right\b",
     ],
     "straight": [
-        r"\bstraight\b",
-        r"\bkeep lane\b",
-        r"\bstay in lane\b",
-        r"\blane keeping\b",
-        r"\bmaintain lane\b",
+        r"\bstraight\b", r"\bkeep lane\b", r"\bstay in lane\b",
+        r"\blane keeping\b", r"\bmaintain lane\b",
     ],
     "scene_observation": [
-        r"\bobserve\b",
-        r"\bvisible\b",
-        r"\bscene\b",
-        r"\bcurrent(?:ly)?\b",
-        r"\bahead\b",
-        r"\bfront\b",
-        r"\blane\b",
-        r"\broad\b",
+        r"\bobserve\b", r"\bvisible\b", r"\bscene\b", r"\bcurrent(?:ly)?\b",
+        r"\bahead\b", r"\bfront\b", r"\blane\b", r"\broad\b",
     ],
     "safety_rationale": [
-        r"\bsafe\b",
-        r"\brisk\b",
-        r"\bhazard\b",
-        r"\bcautious\b",
-        r"\bcollision\b",
-        r"\bdistance\b",
-        r"\bclearance\b",
+        r"\bsafe\b", r"\brisk\b", r"\bhazard\b", r"\bcautious\b",
+        r"\bcollision\b", r"\bdistance\b", r"\bclearance\b",
     ],
 }
 
@@ -188,14 +147,10 @@ def _motion_profile(
 
     if xyz.shape[0] < 2:
         return {
-            "decelerate": 0.0,
-            "accelerate": 0.0,
-            "maintain_speed": 1.0,
-            "turn_left": 0.0,
-            "turn_right": 0.0,
-            "straight": 1.0,
-            "displacement": 0.0,
-            "lateral_delta": 0.0,
+            "decelerate": 0.0, "accelerate": 0.0,
+            "maintain_speed": 1.0, "turn_left": 0.0,
+            "turn_right": 0.0, "straight": 1.0,
+            "displacement": 0.0, "lateral_delta": 0.0,
         }
 
     dxy = xyz[1:, :2] - xyz[:-1, :2]
@@ -236,9 +191,9 @@ def _compute_grounded_fact_score(
 ) -> tuple[float, dict[str, float]]:
     """Reward CoT facts that are checkable from the current sample.
 
-    This intentionally avoids rewarding length. It scores whether the CoT
-    mentions the ego future behavior and available road/scene facts in a way
-    that can be verified from labels or metadata.
+    This is the v1 grounded fact score, kept as a backup for when obstacle
+    data is not available. When obstacle data IS available, the
+    obstacle_grounding_reward provides more precise scoring.
     """
     text_l = coc_text.lower()
     profile = _motion_profile(gt_future_xyz, gt_future_rot)
@@ -248,8 +203,6 @@ def _compute_grounded_fact_score(
         if profile.get(key, 0.0) > 0.5:
             expected.append((key, 1.0))
 
-    # Always require some explicit scene/risk grounding. If map/road geometry is
-    # available in the sample, lane/road mentions become directly checkable.
     expected.append(("scene_observation", 0.6))
     if reference.get("egomotion_lanelines", None) is not None or reference.get(
         "egomotion_road_boundaries", None
@@ -261,8 +214,6 @@ def _compute_grounded_fact_score(
     matched_w = sum(w for key, w in expected if _has_any(text_l, key))
     coverage = matched_w / total_w
 
-    # Penalize unsupported directional/action claims. The trajectory reward still
-    # anchors to GT; this prevents CoT from saying "left" while the sample is right.
     contradictions = 0.0
     opposing = (("turn_left", "turn_right"), ("accelerate", "decelerate"))
     for pos, neg in opposing:
@@ -299,32 +250,25 @@ def _check_coc_traj_consistency(
 ) -> float:
     """Penalize when CoC action description contradicts the actual trajectory.
 
-    Args:
-        coc_text: The extracted CoC reasoning text.
-        predicted_fut_xyz: Predicted trajectory XYZ.
-        predicted_fut_rot: Predicted trajectory rotations.
-
-    Returns:
-        Consistency penalty in [-0.15, 0.0]. Negative = penalty, 0 = no penalty.
+    Returns consistency penalty in [-0.15, 0.0].
     """
     if not coc_text or len(coc_text.strip()) < 10:
         return 0.0
 
     coc_text_l = coc_text.lower()
-    import re as _re
 
-    coc_lon_decel = float(any(_re.search(p, coc_text_l) for p in [
+    coc_lon_decel = float(any(re.search(p, coc_text_l) for p in [
         r"\bslow down\b", r"\bdecelerate\b", r"\bbrake\b", r"\breduce speed\b",
         r"\byield\b", r"\bstop\b(?! at| for)", r"\bwait\b",
     ]))
-    coc_lon_accel = float(any(_re.search(p, coc_text_l) for p in [
+    coc_lon_accel = float(any(re.search(p, coc_text_l) for p in [
         r"\bspeed up\b", r"\baccelerate\b", r"\bincrease speed\b", r"\bproceed\b",
         r"\bgo\b(?!odbye)", r"\badvance\b", r"\bresume\b", r"\bcontinue\b",
     ]))
-    coc_lat_left = float(any(_re.search(p, coc_text_l) for p in [
+    coc_lat_left = float(any(re.search(p, coc_text_l) for p in [
         r"\bturn left\b", r"\bleft turn\b", r"\bsteer left\b", r"\bchange.*left\b",
     ]))
-    coc_lat_right = float(any(_re.search(p, coc_text_l) for p in [
+    coc_lat_right = float(any(re.search(p, coc_text_l) for p in [
         r"\bturn right\b", r"\bright turn\b", r"\bsteer right\b", r"\bchange.*right\b",
     ]))
 
@@ -369,20 +313,26 @@ def compute_hcc_reward(
     config: object | None = None,
     model_config: Any,
 ) -> tuple[float, dict[str, float]]:
-    """Compute the full HCC-RM hierarchical reward.
+    """Compute the full HCC-RM v2 hierarchical reward with grounded scoring.
 
-    Layer structure (gated):
-      R = s1 * (α·s2 + β·s3 + γ·s4)   if s1 > τ_scene
-      R = -1.0                          otherwise
+    The key innovation in v2: replaces regex keyword matching with grounded
+    obstacle and decision checks, which creates real variance in GRPO groups.
+
+    Reward formula (additive, no hard gate):
+      R = w_scene * grounded_scene_score
+        + w_decision * decision_consistency_score
+        + w_traj * trajectory_quality
+        + w_format * format_score
+        + consistency_penalty
 
     Where:
-      s1 = scene understanding (factual accuracy from CoC scorer)
-      s2 = causal coherence (CoC quality aggregate)
-      s3 = reasoning-action alignment (RAA)
-      s4 = trajectory quality (ADE + comfort, normalized)
+      grounded_scene_score = obstacle_grounding (if obstacle data available)
+                            or legacy grounded_fact_score (fallback)
+      decision_consistency_score = COT decision matches GT decision
+      trajectory_quality = exp(-ADE/2) + comfort_norm
 
     Args:
-        to_be_evaluated: The full rollout completion string.
+        to_be_evaluated: Full rollout completion string.
         reference: Reference data dict containing ground truth.
         tokenizer: Text tokenizer.
         traj_tokenizer: Trajectory tokenizer.
@@ -390,15 +340,17 @@ def compute_hcc_reward(
         model_config: Model configuration.
 
     Returns:
-        Tuple of (final_reward, reward_dict) where reward_dict contains
-        all individual component scores for logging.
+        Tuple of (final_reward, reward_dict).
     """
     from cosmos_rl.utils.logging import logger
 
     from rl.rewards.comfort_reward import compute_comfort
-    from rl.rewards.raa_reward import compute_raa_reward
     from rl.rewards.traj_reward import calculate_ade
     from rl.utils.trajectory_decode import decode_rollout_trajectory
+
+    # Import new grounded reward modules
+    from rl.rewards.obstacle_grounding_reward import compute_obstacle_grounding_reward
+    from rl.rewards.decision_consistency_reward import compute_decision_consistency_reward
 
     w = _get_hcc_cfg(config)
 
@@ -414,56 +366,70 @@ def compute_hcc_reward(
     )
 
     # ============================================================
-    # Layer 1: Grounded Scene Facts (no hard length gate)
+    # Layer 1: Grounded Scene Understanding
     # ============================================================
-    coc_scores = compute_coc_quality(to_be_evaluated, weights=w.get("coc_weights"))
     sections = extract_coc_sections(to_be_evaluated)
-
     _coc_text = str(sections["reasoning"]).strip()
     _word_count = len(_coc_text.split())
 
-    print(f"\n[CoC-Debug] word_count={_word_count} factual={coc_scores.get('coc_factual',0):.3f} coherence={coc_scores.get('coc_coherence',0):.3f} safety={coc_scores.get('coc_safety',0):.3f} completeness={coc_scores.get('coc_completeness',0):.3f}\n{_coc_text[:600]}\n[CoC-Debug-End]", flush=True)
-
-    consistency_penalty = _check_coc_traj_consistency(
-        _coc_text, predicted_fut_xyz[0], predicted_fut_rot[0]
-    )
     format_score = float(sections.get("format_score", 0.0))
     ego_future_rot = reference.get("ego_future_rot", None)
     gt_future_for_facts = gt_fut_xyz[0] if gt_fut_xyz.dim() == 3 else gt_fut_xyz
     gt_rot_for_facts = None
     if isinstance(ego_future_rot, torch.Tensor):
         gt_rot_for_facts = ego_future_rot[0] if ego_future_rot.dim() == 4 else ego_future_rot
-    grounded_fact_score, grounded_info = _compute_grounded_fact_score(
-        _coc_text,
-        reference,
-        gt_future_for_facts,
-        gt_rot_for_facts,
+
+    # --- NEW: Obstacle-grounded scene score ---
+    obstacle_result = compute_obstacle_grounding_reward(
+        to_be_evaluated, reference,
+        gt_future_xyz=gt_future_for_facts,
+        gt_future_rot=gt_rot_for_facts,
+    )
+    obstacle_score = obstacle_result.reward
+    obstacle_metrics = obstacle_result.metrics
+
+    # --- Fallback: grounded fact score when no obstacle data ---
+    has_obstacle_data = (
+        reference.get("obstacle_info") is not None
+        or reference.get("obstacle_bbox_history") is not None
+        or reference.get("obstacle_bbox_future") is not None
     )
 
-    s1_scene = 0.45 * coc_scores["coc_factual"] + 0.55 * grounded_fact_score
+    if has_obstacle_data and obstacle_score > 0.0:
+        # Use obstacle-grounded score (more precise, creates variance)
+        s1_scene = obstacle_score
+        scene_source = "obstacle_grounding"
+    else:
+        # Fallback to legacy grounded fact score
+        grounded_fact_score, grounded_info = _compute_grounded_fact_score(
+            _coc_text, reference, gt_future_for_facts, gt_rot_for_facts,
+        )
+        s1_scene = grounded_fact_score
+        scene_source = "grounded_facts"
+        obstacle_metrics = grounded_info  # reuse dict for logging
 
-    # ============================================================
-    # Layer 2: Causal Coherence (Reasoning Quality)
-    # ============================================================
-    s2_coc = coc_scores.get("coc_quality", 0.0)
-    # Normalize to [-1, 1] range: 0→0.0, 1→1.0
-    s2_coc_normalized = 2.0 * s2_coc - 1.0  # [0,1] → [-1,1]
     logger.info(
-        f"[CoC-Detail] factual={coc_scores.get('coc_factual', 0):.3f} "
-        f"coherence={coc_scores.get('coc_coherence', 0):.3f} "
-        f"safety={coc_scores.get('coc_safety', 0):.3f} "
-        f"completeness={coc_scores.get('coc_completeness', 0):.3f} "
-        f"coc_quality={s2_coc:.3f} -> s2_norm={s2_coc_normalized:.3f}"
+        f"[HCC-v2] scene={s1_scene:.3f} source={scene_source} "
+        f"obstacle_score={obstacle_score:.3f} has_data={has_obstacle_data}"
     )
 
     # ============================================================
-    # Layer 3: Reasoning-Action Alignment
+    # Layer 2: Decision Consistency (replaces old CoC quality + RAA)
     # ============================================================
-    raa_reward_val, raa_info = compute_raa_reward(
-        to_be_evaluated, predicted_fut_xyz, predicted_fut_rot, weight=1.0
+    decision_result = compute_decision_consistency_reward(
+        to_be_evaluated, reference,
+        predicted_fut_xyz=predicted_fut_xyz[0],
+        predicted_fut_rot=predicted_fut_rot[0],
     )
-    s3_raa = raa_reward_val  # Already in [0, 1], low for empty/generic intent.
-    s3_raa_normalized = 2.0 * s3_raa - 1.0  # [0,1] → [-1,1]
+    s2_decision = decision_result.reward
+    decision_metrics = decision_result.metrics
+
+    # ============================================================
+    # Layer 3: COT-Trajectory Consistency Penalty (kept from v1)
+    # ============================================================
+    consistency_penalty = _check_coc_traj_consistency(
+        _coc_text, predicted_fut_xyz[0], predicted_fut_rot[0]
+    )
 
     # ============================================================
     # Layer 4: Trajectory Quality (ADE + Comfort)
@@ -481,10 +447,9 @@ def compute_hcc_reward(
     if not (isinstance(comfort_score, (int, float)) and math.isfinite(comfort_score)):
         logger.warning(f"[HCC-Reward] comfort_score non-finite={comfort_score}, using 0")
         comfort_score = 0.0
-    comfort_score_norm = comfort_score - 1.0  # Center around 0
+    comfort_score_norm = comfort_score - 1.0
 
-    # Continuous trajectory reward: exp(-ade/2) in [0, 1]
-    s4_traj = float(__import__('math').exp(-l2_dist / 2.0))
+    s4_traj = float(math.exp(-l2_dist / 2.0))
     s4_comfort = comfort_score_norm
 
     tw = w.get("traj_l2_weight", 0.5)
@@ -494,22 +459,22 @@ def compute_hcc_reward(
         s4_combined = (tw * s4_traj + cw * s4_comfort) / tw_cw_sum
     else:
         s4_combined = s4_traj
-
     s4_combined = max(0.0, s4_combined)
 
-    # Additive reward formula: all layers contribute directly
-    coc_w = w["coc_quality_weight"]
-    raa_w = w["raa_weight"]
-    scene_w = w.get("scene_reward_weight", 0.3)
-    traj_layer_w = max(0.0, 1.0 - scene_w - coc_w - raa_w)
-
+    # ============================================================
+    # Final reward aggregation (additive, no hard gate)
+    # ============================================================
+    scene_w = w.get("obstacle_grounding_weight", 0.25)
+    decision_w = w.get("decision_consistency_weight", 0.30)
+    traj_layer_w = w.get("traj_l2_weight", 0.25) + w.get("comfort_weight", 0.10)
     format_w = 0.05
+
+    # Scale: all components in [0,1] or [-0.15,0], so final in [-0.3, 1.0]
     final_reward = (
-        scene_w * (2.0 * s1_scene - 1.0)
-        + coc_w * s2_coc_normalized
-        + raa_w * s3_raa_normalized
+        scene_w * s1_scene
+        + decision_w * s2_decision
         + traj_layer_w * s4_combined
-        + format_w * (2.0 * format_score - 1.0)
+        + format_w * format_score
         + consistency_penalty
     )
 
@@ -520,34 +485,26 @@ def compute_hcc_reward(
     final_reward = float(max(-1.0, min(1.0, final_reward)))
 
     logger.warning(
-        f"[HCC-RM] s1(scene)={s1_scene:.3f} s2(coc)={s2_coc_normalized:.3f} "
-        f"s3(raa)={s3_raa_normalized:.3f} s4(traj)={s4_combined:.3f} "
-        f"s4_l2={l2_dist:.3f} s4_comf={comfort_score:.3f} "
-        f"facts={grounded_fact_score:.3f} fmt={format_score:.3f} "
+        f"[HCC-v2] s1(scene={scene_source})={s1_scene:.3f} "
+        f"s2(decision)={s2_decision:.3f} "
+        f"s4(traj)={s4_combined:.3f} s4_l2={l2_dist:.3f} "
         f"cons_pen={consistency_penalty:.3f} "
         f"R_final={final_reward:.4f}"
     )
 
+    # Build comprehensive reward dict for logging
     reward_dict = {
         "scene_understanding": float(s1_scene),
-        "coc_quality": float(coc_scores.get("coc_quality", 0.0)),
-        "coc_factual": float(coc_scores.get("coc_factual", 0.0)),
-        "coc_coherence": float(coc_scores.get("coc_coherence", 0.0)),
-        "coc_safety": float(coc_scores.get("coc_safety", 0.0)),
-        "coc_completeness": float(coc_scores.get("coc_completeness", 0.0)),
+        "scene_source": scene_source,
+        "decision_consistency": float(s2_decision),
         "format_score": float(format_score),
         "cot_word_count": float(_word_count),
-        "raa_score": float(s3_raa),
         "traj_L2": float(l2_dist),
         "comfort_reward": float(comfort_score),
-        "reward": float(final_reward),
         "consistency_penalty": float(consistency_penalty),
-        **grounded_info,
-        **{
-            k: float(v) if isinstance(v, (float, int)) else 0.0
-            for k, v in raa_info.items()
-            if not k.startswith("raa_score") and k != "raa_empty_coc"
-        },
+        "reward": float(final_reward),
+        **obstacle_metrics,
+        **decision_metrics,
     }
 
     return final_reward, reward_dict
