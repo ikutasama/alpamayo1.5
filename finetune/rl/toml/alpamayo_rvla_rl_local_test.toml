@@ -179,7 +179,7 @@ fallback_weight = 0.5
 # ---- PGMO: Pareto-Guided Multi-Objective GRPO ----
 [custom.alpamayo.pgmo]
 # Master switch: enable PGMO-GRPO extensions
-enable = false
+enable = true
 
 # Pareto-optimal sample weighting (boost Pareto-frontier samples)
 enable_pareto_weighting = true
