@@ -28,6 +28,7 @@ data:
       include_extr_intr: true
       reshape_tensors_for_rl: true
       use_default_keyframe: false
+      load_obstacle_data: true
       model_config:
         vlm_name_or_path: /data/mnt_m181/z59900495/workspace/model/Cosmos-Reason2-8B
         traj_vocab_size: 4000

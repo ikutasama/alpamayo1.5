@@ -95,6 +95,24 @@ def _is_hcc_enabled(config: object | None) -> bool:
     return has_hcc_keys
 
 
+def _is_hcc_v2_enabled(config: object | None) -> bool:
+    """Check whether HCC-RM v2 (grounded obstacle reward) is enabled.
+
+    v2 is enabled when ``enable_hcc_v2`` is explicitly true in the config,
+    or when ``use_obstacle_reward`` is true.
+    """
+    try:
+        reward_cfg = getattr(config, "custom")["alpamayo"]["reward"]
+    except (TypeError, KeyError, AttributeError):
+        return False
+
+    if reward_cfg.get("enable_hcc_v2", False):
+        return True
+    if reward_cfg.get("use_obstacle_reward", False):
+        return True
+    return False
+
+
 def compute_reward(
     to_be_evaluated: str,
     reference: dict[str, Any],
@@ -106,8 +124,24 @@ def compute_reward(
 ) -> tuple[float, dict[str, float]]:
     """Compute the aggregated reward for a single rollout against reference data.
 
-    Automatically selects HCC-RM or legacy reward based on TOML configuration.
+    Automatically selects HCC-RM v2, HCC-RM v1, or legacy reward based on
+    TOML configuration.
+
+    Priority: v2 (grounded) > v1 (keyword HCC) > legacy (ADE + comfort only).
     """
+    # Check for v2 first (grounded obstacle reward)
+    if _is_hcc_v2_enabled(config):
+        from rl.rewards.hcc_v2_reward import compute_hcc_v2_reward
+
+        return compute_hcc_v2_reward(
+            to_be_evaluated,
+            reference,
+            tokenizer=tokenizer,
+            traj_tokenizer=traj_tokenizer,
+            config=config,
+            model_config=model_config,
+        )
+
     if _is_hcc_enabled(config):
         from rl.rewards.hcc_reward import compute_hcc_reward
 

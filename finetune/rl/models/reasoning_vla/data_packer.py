@@ -316,15 +316,22 @@ class RVLADataPacker(BaseRLDataPacker):
         if _advantage_routing_enabled(getattr(self, "config", None)):
             from rl.rewards.aggregated_reward import compute_reward
 
+            ref_dict = {
+                "ego_future_xyz": data_dict["ego_future_xyz"],
+                "ego_future_rot": data_dict.get("ego_future_rot"),
+                "ego_history_xyz": data_dict["ego_history_xyz"],
+                "ego_history_rot": data_dict["ego_history_rot"],
+                "cot": data_dict.get("cot", ""),
+            }
+            # Pass obstacle data for grounded CoC reward (v2)
+            if "obstacle_data" in data_dict:
+                ref_dict["obstacle_data"] = data_dict["obstacle_data"]
+            if "scene_facts" in data_dict:
+                ref_dict["scene_facts"] = data_dict["scene_facts"]
+
             _, reward_components = compute_reward(
                 rollout_output,
-                {
-                    "ego_future_xyz": data_dict["ego_future_xyz"],
-                    "ego_future_rot": data_dict["ego_future_rot"],
-                    "ego_history_xyz": data_dict["ego_history_xyz"],
-                    "ego_history_rot": data_dict["ego_history_rot"],
-                    "cot": data_dict.get("cot", ""),
-                },
+                ref_dict,
                 tokenizer=alp_tok,
                 traj_tokenizer=traj_tok,
                 config=getattr(self, "config", None),

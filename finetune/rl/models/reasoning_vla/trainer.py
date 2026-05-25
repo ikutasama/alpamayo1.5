@@ -152,6 +152,30 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
             advantages_t = advantages_t.clone()
             advantages_t[nan_mask] = 0.0
 
+        # Apply variance protection: amplify low-variance advantages
+        vp_cfg = self._get_variance_protection_cfg()
+        if vp_cfg.get("enable_rank_advantages", False) or vp_cfg.get("min_group_std", 0.0) > 0:
+            min_std = vp_cfg.get("min_group_std", 0.05)
+            amplify_factor = vp_cfg.get("amplify_factor", 3.0)
+            raw_std = advantages_t.std().item()
+            if raw_std < min_std and raw_std > 1e-8:
+                ratio = min(min_std / raw_std, amplify_factor)
+                advantages_t = advantages_t * ratio
+                if step % 5 == 0:
+                    logger.info(
+                        f"[VarProtect] step={step}: amplified advantages by {ratio:.2f}x "
+                        f"(raw_std={raw_std:.6f} < min_std={min_std})"
+                    )
+
+            # Check if we should skip this update entirely
+            skip_std = vp_cfg.get("skip_update_std", 0.005)
+            if raw_std < skip_std:
+                logger.warning(
+                    f"[VarProtect] step={step}: reward variance too low "
+                    f"(std={raw_std:.6f} < skip_std={skip_std}), zeroing advantages"
+                )
+                advantages_t = torch.zeros_like(advantages_t)
+
         eps = cfg.get("eps", 1e-8)
         clip_value = cfg.get("clip_value", 3.0)
         use_running_stats = cfg.get("use_running_stats", False)
@@ -179,6 +203,15 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                 f"clip=[-{clip_value},+{clip_value}]"
             )
         return normalized
+
+    def _get_variance_protection_cfg(self) -> dict[str, Any]:
+        """Extract variance protection config from TOML [custom.alpamayo.variance_protection]."""
+        try:
+            return getattr(self.config, "custom", {}).get("alpamayo", {}).get(
+                "variance_protection", {}
+            )
+        except (TypeError, AttributeError):
+            return {}
 
     def _get_advantage_normalization_cfg(self) -> dict[str, Any]:
         try:

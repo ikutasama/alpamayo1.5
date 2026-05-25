@@ -42,6 +42,7 @@ class PAIDataset(Dataset):
         num_history_steps: int = 16,
         num_future_steps: int = 64,
         time_step: float = 0.1,
+        load_obstacle_data: bool = False,
     ):
         """Initialize dataset.
 
@@ -75,6 +76,7 @@ class PAIDataset(Dataset):
         self.include_extr_intr = include_extr_intr
         self.use_default_keyframe = use_default_keyframe
         self.reshape_tensors_for_rl = reshape_tensors_for_rl
+        self.load_obstacle_data = load_obstacle_data
 
         self.num_history_steps = num_history_steps
         self.num_future_steps = num_future_steps
@@ -154,5 +156,24 @@ class PAIDataset(Dataset):
 
         if self.vla_preprocess_func is not None:
             sample_data["tokenized_data"] = self.vla_preprocess_func(data=sample_data)
+
+        # Load obstacle.offline data for grounded CoC reward
+        if self.load_obstacle_data:
+            try:
+                from alpamayo1_5.load_physical_aiavdataset import load_obstacle_data_for_sample
+
+                obstacle_info = load_obstacle_data_for_sample(
+                    clip_id,
+                    t0_us,
+                    self.avdi,
+                    num_history_steps=self.num_history_steps,
+                    num_future_steps=self.num_future_steps,
+                    time_step=self.time_step,
+                )
+                if obstacle_info is not None:
+                    sample_data["obstacle_data"] = obstacle_info["obstacle_data"]
+                    sample_data["scene_facts"] = obstacle_info["scene_facts"]
+            except Exception:
+                pass  # Obstacle loading is optional; failures are non-fatal
 
         return sample_data

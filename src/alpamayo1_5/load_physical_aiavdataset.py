@@ -220,3 +220,54 @@ def load_physical_aiavdataset(
         "t0_us": t0_us,
         "clip_id": clip_id,
     }
+
+
+def load_obstacle_data_for_sample(
+    clip_id: str,
+    t0_us: int,
+    avdi: Any,
+    num_history_steps: int = 16,
+    num_future_steps: int = 64,
+    time_step: float = 0.1,
+) -> dict[str, Any] | None:
+    """Load obstacle.offline data for a specific sample.
+
+    This is a convenience wrapper that loads obstacle data and extracts
+    scene facts for grounded CoC reward computation.
+
+    Args:
+        clip_id: Clip identifier.
+        t0_us: Reference timestamp in microseconds.
+        avdi: PhysicalAIAVDatasetLocalInterface instance.
+        num_history_steps: History steps (for time window).
+        num_future_steps: Future steps (for time window).
+        time_step: Seconds per step.
+
+    Returns:
+        Dict with 'obstacle_data' and 'scene_facts', or None if unavailable.
+    """
+    try:
+        from rl.rewards.obstacle_reward import (
+            extract_scene_facts_from_obstacles,
+            load_obstacle_offline,
+        )
+
+        obstacle_data = load_obstacle_offline(
+            clip_id,
+            avdi,
+            t0_us,
+            num_history_steps=num_history_steps,
+            num_future_steps=num_future_steps,
+            time_step=time_step,
+        )
+
+        if obstacle_data is not None:
+            scene_facts = extract_scene_facts_from_obstacles(obstacle_data)
+            return {
+                "obstacle_data": obstacle_data,
+                "scene_facts": scene_facts,
+            }
+    except Exception:
+        pass  # Obstacle data is optional; failures are non-fatal
+
+    return None
