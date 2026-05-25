@@ -111,6 +111,7 @@ def _rollout_train_diagnostics(
 
     metric_keys = [
         "scene_understanding",
+        "scene_source",
         "grounded_fact_score",
         "grounded_fact_coverage",
         "grounded_fact_contradictions",
@@ -120,6 +121,29 @@ def _rollout_train_diagnostics(
         "traj_L2",
         "format_score",
         "consistency_penalty",
+        # v2 grounded reward metrics
+        "obstacle_grounding_score",
+        "obstacle_type_match",
+        "obstacle_direction_match",
+        "obstacle_threat_match",
+        "obstacle_threat_penalty",
+        "obstacle_hallucination_penalty",
+        "num_gt_obstacles",
+        "decision_consistency",
+        "decision_consistency_score",
+        "cot_gt_match",
+        "cot_pred_match",
+        "pred_gt_match",
+        "gt_is_stopped",
+        "gt_is_yield",
+        "gt_is_nudge",
+        "gt_is_maintain",
+        "gt_is_slow_down",
+        "gt_is_accelerate",
+        "gt_is_turn_left",
+        "gt_is_turn_right",
+        "cot_has_decision",
+        "cot_num_decisions",
     ]
     infos = [ri for ri in reward_infos if isinstance(ri, dict) and ri]
     for key in metric_keys:
