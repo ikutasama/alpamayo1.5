@@ -230,4 +230,4 @@ torchelastic/
 *.pth
 *.bin
 *.pt
-.pdf
+*.pdf
