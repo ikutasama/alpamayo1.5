@@ -95,11 +95,10 @@ else
 fi
 echo "" | tee -a "$R"
 
-echo "=== 3. Reward Trend (first → last) ===" | tee -a "$R"
+echo "=== 3. Reward Trend (first -> last) ===" | tee -a "$R"
 if [ -f "$POLICY_LOG" ]; then
   first_r=$(grep "\[Step " "$POLICY_LOG" 2>/dev/null | head -1 | grep -oP 'raw_reward=[0-9.\-]+')
   last_r=$(grep "\[Step " "$POLICY_LOG" 2>/dev/null | tail -1 | grep -oP 'raw_reward=[0-9.\-]+')
-  # Also extract loss and grad_norm for first and last
   first_l=$(grep "\[Step " "$POLICY_LOG" 2>/dev/null | head -1 | grep -oP 'loss=[0-9.\-]+')
   last_l=$(grep "\[Step " "$POLICY_LOG" 2>/dev/null | tail -1 | grep -oP 'loss=[0-9.\-]+')
   first_g=$(grep "\[Step " "$POLICY_LOG" 2>/dev/null | head -1 | grep -oP 'gn=[0-9.\-]+')
@@ -115,7 +114,6 @@ echo "" | tee -a "$R"
 
 echo "=== 4. HCC-v2 Reward Breakdown ===" | tee -a "$R"
 if [ -f "$POLICY_LOG" ]; then
-  # v2 uses [HCC-v2] tag
   grep -E "\[HCC-v2\]|\[HCC-RM\]|\[HCC-Reward\]" "$POLICY_LOG" | tail -20 | tee -a "$R"
   echo "  ($(grep -c '\[HCC-v2\]' "$POLICY_LOG" 2>/dev/null || echo 0) HCC-v2 entries)" | tee -a "$R"
 else
@@ -125,7 +123,6 @@ echo "" | tee -a "$R"
 
 echo "=== 5. Reward Variance (CRITICAL — measures if template-collapse is fixed) ===" | tee -a "$R"
 if [ -f "$POLICY_LOG" ]; then
-  # Extract raw_reward_std from [Step] lines
   grep "\[Step " "$POLICY_LOG" | tail -20 | grep -oP 'raw_reward=[0-9.\-]+' | grep -oP '[0-9.\-]+' | python3 -c "
 import sys
 vals = [float(v.strip()) for v in sys.stdin if v.strip()]
@@ -133,13 +130,11 @@ if vals:
     import numpy as np
     a = np.array(vals)
     print(f'  last 20 steps reward: mean={a.mean():.4f} std={a.std():.4f} min={a.min():.4f} max={a.max():.4f}')
-    print(f'  variance health: GOOD (std>0.05) if std>{a.std():.4f}')
+    status = 'HEALTHY' if a.std() > 0.05 else 'COLLAPSED (std<0.05)'
+    print(f'  variance status: {status}')
 else:
     print('  No reward values extracted')
 " | tee -a "$R"
-
-  # Also check advantage_std (gradient signal)
-  grep "\[Step " "$POLICY_LOG" | tail -10 | tee -a "$R"
 else
   echo "  No data" | tee -a "$R"
 fi
@@ -147,27 +142,22 @@ echo "" | tee -a "$R"
 
 echo "=== 6. Obstacle Grounding Status ===" | tee -a "$R"
 if [ -f "$POLICY_LOG" ]; then
-  # Check if obstacle data is being loaded
   obs_load_fail=$(grep -c "Failed to load obstacle" "$POLICY_LOG" 2>/dev/null || echo 0)
-  obs_success=$(grep -c "obstacle_info" "$POLICY_LOG" 2>/dev/null || echo 0)
-  obs_source=$(grep "scene_source=" "$POLICY_LOG" 2>/dev/null | tail -5 | tee -a "$R")
+  obs_source=$(grep "scene_source=" "$POLICY_LOG" 2>/dev/null | tail -5)
   echo "  obstacle load failures: $obs_load_fail" | tee -a "$R"
-  echo "  obstacle info references: $obs_success" | tee -a "$R"
-  # Check obstacle_grounding_score from HCC-v2 logs
-  grep "obstacle" "$POLICY_LOG" | tail -10 | tee -a "$R"
+  echo "  scene source (last 5): $obs_source" | tee -a "$R"
+  grep -i "obstacle" "$POLICY_LOG" | tail -10 | tee -a "$R"
 else
   echo "  No data" | tee -a "$R"
 fi
 echo "" | tee -a "$R"
 
-echo "=== 7. Decision Distribution (what GT decisions look like) ===" | tee -a "$R"
+echo "=== 7. Decision Distribution (GT decision types in training data) ===" | tee -a "$R"
 if [ -f "$POLICY_LOG" ]; then
-  # Count how many steps have each GT decision type
-  for dec in stop yield nudge maintain slow_down accelerate turn_left turn_right; do
+  for dec in stopped yield nudge maintain slow_down accelerate turn_left turn_right; do
     count=$(grep -c "gt_is_${dec}" "$POLICY_LOG" 2>/dev/null || echo 0)
-    echo "  gt_is_${dec}: $count mentions" | tee -a "$R"
+    echo "  gt_is_${dec}: $count references" | tee -a "$R"
   done
-  # Extract decision consistency scores from HCC-v2
   grep "s2(decision)" "$POLICY_LOG" | tail -10 | tee -a "$R"
 else
   echo "  No data" | tee -a "$R"
@@ -183,7 +173,7 @@ else
 fi
 echo "" | tee -a "$R"
 
-echo "=== 9. CoC Debug Output ===" | tee -a "$R"
+echo "=== 9. CoC Debug ===" | tee -a "$R"
 for f in "$POLICY_LOG" "$ROLL_LOG"; do
   if [ -f "$f" ]; then
     grep "\[CoC-Debug" "$f" | tail -5 | tee -a "$R"
@@ -240,13 +230,11 @@ try:
     tags = sorted(ea.Tags().get('scalars', []))
     print(f'  {len(tags)} scalar tags found')
 
-    # v2 priority keys — the most important metrics
     v2_keys = [
         'train/raw_reward_mean', 'train/raw_reward_std',
         'train/raw_reward_min', 'train/raw_reward_max',
         'train/loss_avg', 'train/grad_norm',
         'train/advantage_mean', 'train/advantage_std',
-        # v2 grounded reward components
         'train/reward_scene_understanding_mean',
         'train/reward_obstacle_grounding_score_mean',
         'train/reward_obstacle_type_match_mean',
@@ -259,14 +247,12 @@ try:
         'train/reward_consistency_penalty_mean',
         'train/reward_num_gt_obstacles_mean',
         'train/reward_obstacle_hallucination_penalty_mean',
-        # GT decision distribution
         'train/reward_gt_is_stopped_mean',
         'train/reward_gt_is_yield_mean',
         'train/reward_gt_is_nudge_mean',
         'train/reward_gt_is_maintain_mean',
         'train/reward_gt_is_slow_down_mean',
         'train/reward_gt_is_accelerate_mean',
-        # COT diversity
         'train/unique_completion_ratio',
         'train/cot_word_count_mean',
         'train/reward_cot_has_decision_mean',
@@ -282,7 +268,6 @@ try:
         else:
             print(f'  {t}: NOT FOUND')
 
-    # Show other tags not in v2_keys
     other = [t for t in tags if t not in v2_keys]
     if other:
         print(f'  Other tags ({len(other)}):')
@@ -318,7 +303,6 @@ else: print('DECREASING (concern)')
       echo "  Reward trend: $improved" | tee -a "$R"
     fi
 
-    # Check if v2 reward is actually being used
     v2_count=$(grep -c "\[HCC-v2\]" "$POLICY_LOG" 2>/dev/null || echo 0)
     v1_count=$(grep -c "\[HCC-RM\]" "$POLICY_LOG" 2>/dev/null || echo 0)
     echo "  HCC-v2 entries: $v2_count  |  HCC-v1 entries: $v1_count" | tee -a "$R"
@@ -340,4 +324,3 @@ echo "" | tee -a "$R"
 echo "======== END OF v2 REPORT ========" | tee -a "$R"
 echo ""
 echo "Report saved to: $R ($(wc -l < "$R") lines)"
-echo "Send the contents of $R to me for analysis."
