@@ -181,6 +181,10 @@ class RVLADataPacker(BaseRLDataPacker):
 
         prompt_dict: TokensPrompt = {"prompt_token_ids": token_ids}
 
+        # Include scene_facts for grounded CoC reward (pure Python dict, safe for serialization)
+        if "scene_facts" in sample:
+            prompt_dict["scene_facts"] = sample["scene_facts"]
+
         # Build multi-modal data processor config
         mm_data: dict[str, Any] = {}
         image_frames = sample.get("image_frames", None)

@@ -79,4 +79,5 @@ class AlpamayoCosmosDataset(Dataset):
             "obstacle_bbox_history": sample.get("obstacle_bbox_history", None),
             "obstacle_bbox_future": sample.get("obstacle_bbox_future", None),
             "cot": sample.get("cot", ""),
+            "scene_facts": sample.get("scene_facts", None),
         }
