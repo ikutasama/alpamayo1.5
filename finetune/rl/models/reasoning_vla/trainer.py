@@ -120,6 +120,22 @@ def _rollout_train_diagnostics(
         "traj_L2",
         "format_score",
         "consistency_penalty",
+        # HCC-v2 grounded metrics
+        "decision_alignment",
+        "object_recall",
+        "grounded_coc_reward",
+        "hallucination_score",
+        "spatial_accuracy",
+        "threat_score",
+        "num_high_threat_objects",
+        "closest_obstacle_distance",
+        "coc_unique_ratio",
+        "diversity_score",
+        "gt_decision_alignment",
+        "correct_object_mentions",
+        "false_object_mentions",
+        "traj_quality",
+        "cot_word_count",
     ]
     infos = [ri for ri in reward_infos if isinstance(ri, dict) and ri]
     for key in metric_keys:
@@ -560,7 +576,12 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                     report_data[f"train/advantage_{key}_mean"] = tensor.mean().item()
                     report_data[f"train/advantage_{key}_std"] = tensor.std().item() if tensor.numel() > 1 else 0.0
                 raw_reward = report_data.get("train/raw_reward_mean", float("nan"))
-                print(f"[Step {current_step}] loss={loss.item():.6f}, raw_reward={raw_reward:.4f}, adv={advantages_t.mean().item():.4f}, gn={grad_norm_sum.item():.4f}")
+                reward_std = report_data.get("train/raw_reward_std", float("nan"))
+                logger.warning(
+                    f"[Step {current_step}] loss={loss.item():.6f}, "
+                    f"raw_reward={raw_reward:.4f}, reward_std={reward_std:.4f}, "
+                    f"adv={advantages_t.mean().item():.4f}, gn={grad_norm_sum.item():.4f}"
+                )
 
                 if self.config.logging.report_mfu:
                     mfu = compute_mfu(

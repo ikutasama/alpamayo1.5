@@ -642,9 +642,10 @@ class PGMOTrainer(AlpamayoGRPOTrainer):
                     report_data["train/contrastive_loss"] = contrastive_loss_avg
 
                 raw_reward = report_data.get("train/raw_reward_mean", float("nan"))
-                print(
+                reward_std = report_data.get("train/raw_reward_std", float("nan"))
+                logger.warning(
                     f"[Step {current_step}] loss={loss.item():.6f}, "
-                    f"raw_reward={raw_reward:.4f}, "
+                    f"raw_reward={raw_reward:.4f}, reward_std={reward_std:.4f}, "
                     f"adv={advantages_t.mean().item():.4f}, "
                     f"gn={grad_norm_sum.item():.4f}"
                     + (
