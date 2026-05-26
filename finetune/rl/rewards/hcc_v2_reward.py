@@ -126,6 +126,10 @@ def compute_hcc_v2_reward(
     format_score = float(sections.get("format_score", 0.0))
     word_count = len(coc_text.split())
 
+    # Print CoC for debugging (using print not logger to ensure visibility)
+    print(f"\n[HCC-v2] CoC: {coc_text}", flush=True)
+    print(f"[HCC-v2] word_count={word_count} format_score={format_score:.2f}", flush=True)
+
     # ---- Get scene facts (pre-computed from obstacle data) ----
     scene_facts = reference.get("scene_facts", None)
 
@@ -144,6 +148,12 @@ def compute_hcc_v2_reward(
             "num_obstacles": 0,
             "high_threat_objects": [],
         }
+        print("[HCC-v2] WARNING: No scene_facts available", flush=True)
+    else:
+        print(f"[HCC-v2] scene_facts: num_obstacles={scene_facts.get('num_obstacles', 0)} "
+              f"vehicle={scene_facts.get('has_vehicle_nearby')} "
+              f"ped={scene_facts.get('has_pedestrian_nearby')} "
+              f"closest_dist={scene_facts.get('closest_distance', 'N/A')}", flush=True)
 
     # ============================================================
     # Layer 1: Scene Understanding (Grounded)
@@ -279,6 +289,13 @@ def compute_hcc_v2_reward(
     if not (isinstance(final_reward, (int, float)) and math.isfinite(final_reward)):
         final_reward = 0.0
     final_reward = float(max(-1.0, min(1.0, final_reward)))
+
+    # Print reward breakdown for debugging
+    print(f"[HCC-v2] Layers: scene={s1_scene:.3f}(w={scene_w:.2f}) "
+          f"decision={s2_decision:.3f}(w={raa_w:.2f}) "
+          f"coc_q={s3_coc:.3f}(w={coc_w:.2f}) "
+          f"traj={s4_combined:.3f}(w={traj_w:.2f}) "
+          f"l2={l2_dist:.2f} → R={final_reward:.4f}", flush=True)
 
     # ============================================================
     # Build reward dict for logging
