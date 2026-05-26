@@ -171,8 +171,10 @@ class PAIDataset(Dataset):
                     time_step=self.time_step,
                 )
                 if obstacle_info is not None:
-                    sample_data["obstacle_data"] = obstacle_info["obstacle_data"]
-                    sample_data["scene_facts"] = obstacle_info["scene_facts"]
+                    # Only store scene_facts (pure Python types, safe for
+                    # prefetch shared memory serialization)
+                    if "scene_facts" in obstacle_info:
+                        sample_data["scene_facts"] = obstacle_info["scene_facts"]
             except Exception:
                 pass  # Obstacle loading is optional; failures are non-fatal
 

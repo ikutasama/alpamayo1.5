@@ -232,19 +232,10 @@ def load_obstacle_data_for_sample(
 ) -> dict[str, Any] | None:
     """Load obstacle.offline data for a specific sample.
 
-    This is a convenience wrapper that loads obstacle data and extracts
-    scene facts for grounded CoC reward computation.
-
-    Args:
-        clip_id: Clip identifier.
-        t0_us: Reference timestamp in microseconds.
-        avdi: PhysicalAIAVDatasetLocalInterface instance.
-        num_history_steps: History steps (for time window).
-        num_future_steps: Future steps (for time window).
-        time_step: Seconds per step.
-
-    Returns:
-        Dict with 'obstacle_data' and 'scene_facts', or None if unavailable.
+    Returns a dict with 'scene_facts' only (pure Python types, safe for
+    shared memory serialization through the prefetch server).
+    The full obstacle_data is NOT stored to avoid serialization issues
+    with numpy arrays in the prefetch pipeline.
     """
     try:
         from rl.rewards.obstacle_reward import (
@@ -263,11 +254,14 @@ def load_obstacle_data_for_sample(
 
         if obstacle_data is not None:
             scene_facts = extract_scene_facts_from_obstacles(obstacle_data)
-            return {
-                "obstacle_data": obstacle_data,
-                "scene_facts": scene_facts,
-            }
-    except Exception:
-        pass  # Obstacle data is optional; failures are non-fatal
+            # Only return scene_facts (pure Python dict with bool/float/str).
+            # Do NOT return obstacle_data which contains numpy arrays that
+            # cannot be serialized through shared memory prefetch.
+            return {"scene_facts": scene_facts}
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger("cosmos").debug(
+            f"load_obstacle_data_for_sample failed for {clip_id}: {e}"
+        )
 
     return None

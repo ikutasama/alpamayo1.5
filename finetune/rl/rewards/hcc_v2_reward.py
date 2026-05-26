@@ -86,7 +86,7 @@ def compute_hcc_v2_reward(
 
     Args:
         to_be_evaluated: Full rollout completion string.
-        reference: Reference data dict (must include obstacle_data if available).
+        reference: Reference data dict (must include scene_facts if available).
         tokenizer: Text tokenizer.
         traj_tokenizer: Trajectory tokenizer.
         config: Cosmos-RL config.
@@ -126,35 +126,30 @@ def compute_hcc_v2_reward(
     format_score = float(sections.get("format_score", 0.0))
     word_count = len(coc_text.split())
 
-    # ---- Get obstacle data (if available) ----
-    obstacle_data = reference.get("obstacle_data", None)
+    # ---- Get scene facts (pre-computed from obstacle data) ----
     scene_facts = reference.get("scene_facts", None)
 
     if scene_facts is None:
-        # If obstacle data wasn't pre-loaded, create empty scene facts
-        if obstacle_data is not None:
-            from rl.rewards.obstacle_reward import extract_scene_facts_from_obstacles
-            scene_facts = extract_scene_facts_from_obstacles(obstacle_data)
-        else:
-            # No obstacle data available — use minimal defaults
-            scene_facts = {
-                "has_vehicle_nearby": False,
-                "has_pedestrian_nearby": False,
-                "has_cyclist_nearby": False,
-                "closest_object_type": None,
-                "closest_distance": float("inf"),
-                "object_on_left": False,
-                "object_on_right": False,
-                "object_ahead": False,
-                "approaching_object": False,
-                "num_obstacles": 0,
-                "high_threat_objects": [],
-            }
+        # No obstacle data available — use minimal defaults
+        scene_facts = {
+            "has_vehicle_nearby": False,
+            "has_pedestrian_nearby": False,
+            "has_cyclist_nearby": False,
+            "closest_object_type": None,
+            "closest_distance": float("inf"),
+            "object_on_left": False,
+            "object_on_right": False,
+            "object_ahead": False,
+            "approaching_object": False,
+            "num_obstacles": 0,
+            "high_threat_objects": [],
+        }
 
     # ============================================================
     # Layer 1: Scene Understanding (Grounded)
     # ============================================================
-    if w.get("use_obstacle_reward", True) and obstacle_data is not None:
+    has_real_obstacles = scene_facts.get("num_obstacles", 0) > 0
+    if w.get("use_obstacle_reward", True) and has_real_obstacles:
         # Use grounded CoC reward with obstacle verification
         grounded = compute_grounded_coc_reward(
             coc_text, scene_facts, gt_fut_xyz[0] if gt_fut_xyz.dim() == 3 else gt_fut_xyz,

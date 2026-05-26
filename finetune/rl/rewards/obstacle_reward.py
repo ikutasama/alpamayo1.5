@@ -16,24 +16,27 @@
 """Load obstacle.offline data from the PAI dataset for grounded CoC reward.
 
 The obstacle.offline feature contains per-clip parquet files with tracked
-obstacle information including 3D bounding boxes, object types, velocities,
-and headings.  This module provides helpers to load this data and extract
-scene-grounded facts that can be used to verify Chain-of-Causation reasoning.
+obstacle information.  This module provides helpers to load this data and
+extract scene-grounded facts that can be used to verify Chain-of-Causation
+reasoning.
+
+IMPORTANT: This module is designed to be extremely robust to schema
+variations.  The obstacle.offline parquet schema is not officially
+documented, so we handle multiple possible column name conventions and
+nested struct types.
 """
 
 from __future__ import annotations
 
 import io
+import logging
 import zipfile
 from typing import Any
 
 import numpy as np
 import pandas as pd
-import torch
 
-from alpamayo1_5.common import logging
-
-logger = logging.RankedLogger(__name__, rank_zero_only=True)
+logger = logging.getLogger("cosmos")
 
 
 def load_obstacle_offline(
@@ -46,257 +49,316 @@ def load_obstacle_offline(
 ) -> dict[str, Any] | None:
     """Load obstacle.offline data for a specific clip and time window.
 
-    Args:
-        clip_id: The clip identifier.
-        avdi: PhysicalAIAVDatasetLocalInterface instance.
-        t0_us: Reference timestamp in microseconds.
-        num_history_steps: Number of history steps (to define time window).
-        num_future_steps: Number of future steps (to define time window).
-        time_step: Seconds per step.
-
     Returns:
         Dict with obstacle data or None if not available.  Keys:
-          - ``obstacles``: list of dicts, each with:
-              - ``track_id``: int
-              - ``object_type``: str (vehicle/pedestrian/cyclist/...)
-              - ``positions``: np.ndarray of shape (T, 3) in ego frame at t0
-              - ``velocities``: np.ndarray of shape (T, 3)
-              - ``heading``: np.ndarray of shape (T,)
-              - ``bbox_lwh``: np.ndarray of shape (3,) — length, width, height
-              - ``distances``: np.ndarray of shape (T,) — distance to ego
-          - ``closest_obstacle``: dict with the nearest obstacle info
+          - ``obstacles``: list of dicts with per-obstacle info
+          - ``closest_obstacle``: dict with nearest obstacle info
           - ``obstacle_summary``: str description of the scene
     """
     try:
         feature_name = "obstacle.offline"
         if feature_name not in avdi.features.features_df.index:
-            logger.warning(f"Feature '{feature_name}' not available in dataset.")
             return None
 
         obstacle_data = avdi.get_clip_feature(clip_id, feature_name)
         if obstacle_data is None:
             return None
 
-        # obstacle_data is returned as a dict of {key: parquet_bytes_or_df}
-        # based on pai_utils.py generic zip handling
-        if isinstance(obstacle_data, dict):
-            # Find the parquet data
-            for key, value in obstacle_data.items():
-                if isinstance(value, pd.DataFrame):
-                    obstacle_df = value
-                    break
-                elif isinstance(value, (bytes, io.BytesIO)):
-                    buf = value if isinstance(value, io.BytesIO) else io.BytesIO(value)
-                    obstacle_df = pd.read_parquet(buf)
-                    break
-            else:
-                logger.warning(f"Could not find readable obstacle data for {clip_id}")
-                return None
-        elif isinstance(obstacle_data, pd.DataFrame):
-            obstacle_df = obstacle_data
-        else:
-            logger.warning(f"Unexpected obstacle data type: {type(obstacle_data)}")
-            return None
-
     except Exception as e:
         logger.warning(f"Failed to load obstacle.offline for {clip_id}: {e}")
         return None
 
-    # Define time window around t0
-    t0_s = t0_us * 1e-6
-    history_start = t0_s - num_history_steps * time_step
-    future_end = t0_s + num_future_steps * time_step
+    # obstacle_data from pai_utils generic zip handler is a dict:
+    #   {"obstacle.offline": pd.DataFrame}
+    obstacle_df = None
+    if isinstance(obstacle_data, dict):
+        for key, value in obstacle_data.items():
+            if isinstance(value, pd.DataFrame):
+                obstacle_df = value
+                break
+            elif isinstance(value, (bytes, io.BytesIO)):
+                buf = value if isinstance(value, io.BytesIO) else io.BytesIO(value)
+                obstacle_df = pd.read_parquet(buf)
+                break
+    elif isinstance(obstacle_data, pd.DataFrame):
+        obstacle_df = obstacle_data
 
-    return _parse_obstacle_df(obstacle_df, t0_us, history_start, future_end)
+    if obstacle_df is None or obstacle_df.empty:
+        return None
+
+    return _parse_obstacle_df(obstacle_df, t0_us)
+
+
+def _find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    """Find the first matching column name (case-insensitive)."""
+    cols_lower = {c.lower().strip(): c for c in df.columns}
+    for candidate in candidates:
+        if candidate.lower() in cols_lower:
+            return cols_lower[candidate.lower()]
+    return None
+
+
+def _extract_nested(df: pd.DataFrame, col: str, sub: str) -> pd.Series | None:
+    """Extract a sub-field from a struct/nested column."""
+    try:
+        series = df[col]
+        if hasattr(series, 'dtypes') and hasattr(series.dtypes, 'pyarrow_dtype'):
+            # PyArrow struct
+            return series.struct.field(sub)
+        # Try dict-like access
+        first = series.iloc[0]
+        if isinstance(first, dict) and sub in first:
+            return series.apply(lambda x: x.get(sub) if isinstance(x, dict) else None)
+        if hasattr(first, '__getattr__'):
+            return series.apply(lambda x: getattr(x, sub, None))
+    except Exception:
+        pass
+    return None
 
 
 def _parse_obstacle_df(
     df: pd.DataFrame,
     t0_us: int,
-    history_start_s: float,
-    future_end_s: float,
 ) -> dict[str, Any] | None:
     """Parse obstacle dataframe into structured obstacle information.
 
-    The obstacle.offline parquet schema typically includes columns like:
-    - timestamp (int64, microseconds)
-    - track_id (int)
-    - object_type (str or int category)
-    - x, y, z (float, position in some reference frame)
-    - vx, vy, vz (float, velocity)
-    - heading / yaw (float)
-    - length, width, height (float, bounding box dimensions)
-
-    Note: The exact schema depends on the dataset version. This parser
-    handles common column name variants.
+    Handles multiple possible schemas robustly.
     """
     if df is None or df.empty:
         return None
 
-    # Normalize column names (lowercase, strip whitespace)
-    df = df.copy()
-    df.columns = [str(c).strip().lower() for c in df.columns]
+    # Log schema for debugging (only first time)
+    if not hasattr(_parse_obstacle_df, '_logged_schemas'):
+        _parse_obstacle_df._logged_schemas = set()
+    schema_key = tuple(sorted(str(c) for c in df.columns))
+    if schema_key not in _parse_obstacle_df._logged_schemas:
+        _parse_obstacle_df._logged_schemas.add(schema_key)
+        logger.info(f"[ObstacleParser] Schema columns: {list(df.columns)}")
+        logger.info(f"[ObstacleParser] Shape: {df.shape}, dtypes: {dict(df.dtypes)}")
+        if len(df) > 0:
+            logger.info(f"[ObstacleParser] Sample row: {df.iloc[0].to_dict()}")
 
-    # Try to find timestamp column
+    # Normalize column names
+    col_map = {}
+    for c in df.columns:
+        col_map[str(c).strip().lower()] = c
+
+    # Find timestamp column
     ts_col = None
-    for candidate in ("timestamp", "time", "ts", "timestamp_us"):
-        if candidate in df.columns:
-            ts_col = candidate
+    for candidate in ["timestamp", "time", "ts", "timestamp_us", "t"]:
+        if candidate in col_map:
+            ts_col = col_map[candidate]
             break
-
-    if ts_col is None:
-        logger.warning("No timestamp column found in obstacle data")
-        return None
-
-    # Convert timestamps to seconds for filtering
-    timestamps = df[ts_col].values
-    if timestamps.dtype in (np.int64, np.int32) and timestamps.max() > 1e12:
-        # Timestamps are in microseconds
-        ts_seconds = timestamps * 1e-6
-    elif timestamps.dtype in (np.int64, np.int32) and timestamps.max() > 1e9:
-        ts_seconds = timestamps * 1e-3  # milliseconds
-    else:
-        ts_seconds = timestamps.astype(np.float64)
-
-    # Filter to time window
-    mask = (ts_seconds >= history_start_s) & (ts_seconds <= future_end_s)
-    df_filtered = df[mask].copy()
-    if df_filtered.empty:
-        return {"obstacles": [], "closest_obstacle": None, "obstacle_summary": "no obstacles detected"}
 
     # Find track_id column
     track_col = None
-    for candidate in ("track_id", "trackid", "object_id", "id", "track"):
-        if candidate in df_filtered.columns:
-            track_col = candidate
+    for candidate in ["track_id", "trackid", "object_id", "id", "track", "agent_id"]:
+        if candidate in col_map:
+            track_col = col_map[candidate]
             break
-
-    if track_col is None:
-        # If no track_id, treat all rows as one track
-        df_filtered["_track_id"] = 0
-        track_col = "_track_id"
 
     # Find object_type column
     type_col = None
-    for candidate in ("object_type", "type", "class", "category", "label"):
-        if candidate in df_filtered.columns:
-            type_col = candidate
+    for candidate in ["object_type", "type", "class", "category", "label",
+                       "agent_type", "object_class"]:
+        if candidate in col_map:
+            type_col = col_map[candidate]
             break
 
-    # Find position columns
+    # Find position columns (flat)
     pos_cols = {}
     for axis in ("x", "y", "z"):
-        for candidate in (axis, f"pos_{axis}", f"position_{axis}", f"center_{axis}"):
-            if candidate in df_filtered.columns:
-                pos_cols[axis] = candidate
+        for candidate in [axis, f"pos_{axis}", f"position_{axis}", f"center_{axis}",
+                          f"translation_{axis}"]:
+            if candidate in col_map:
+                pos_cols[axis] = col_map[candidate]
                 break
 
-    # Find velocity columns
+    # Find velocity columns (flat)
     vel_cols = {}
     for axis in ("x", "y", "z"):
-        for candidate in (f"v{axis}", f"vel_{axis}", f"velocity_{axis}"):
-            if candidate in df_filtered.columns:
-                vel_cols[axis] = candidate
+        for candidate in [f"v{axis}", f"vel_{axis}", f"velocity_{axis}",
+                          f"speed_{axis}"]:
+            if candidate in col_map:
+                vel_cols[axis] = col_map[candidate]
                 break
 
     # Find heading column
     heading_col = None
-    for candidate in ("heading", "yaw", "rotation_z", "orientation"):
-        if candidate in df_filtered.columns:
-            heading_col = candidate
+    for candidate in ["heading", "yaw", "rotation_z", "orientation",
+                       "heading_rad", "yaw_rad"]:
+        if candidate in col_map:
+            heading_col = col_map[candidate]
             break
 
     # Find bbox columns
     bbox_cols = {}
     for dim in ("length", "width", "height"):
-        for candidate in (dim, f"bbox_{dim}", f"size_{dim}", f"lwh_{dim[0]}"):
-            if candidate in df_filtered.columns:
-                bbox_cols[dim] = candidate
+        for candidate in [dim, f"bbox_{dim}", f"size_{dim}", f"lwh_{dim[0]}",
+                          f"dim_{dim}"]:
+            if candidate in col_map:
+                bbox_cols[dim] = col_map[candidate]
                 break
 
+    # Check for nested struct columns (e.g., "position" as struct{x,y,z})
+    if not pos_cols:
+        for struct_name in ["position", "pos", "translation", "center", "location"]:
+            if struct_name in col_map:
+                for axis in ("x", "y", "z"):
+                    extracted = _extract_nested(df, col_map[struct_name], axis)
+                    if extracted is not None:
+                        tmp_col = f"_pos_{axis}"
+                        df = df.copy()
+                        df[tmp_col] = extracted
+                        pos_cols[axis] = tmp_col
+                if pos_cols:
+                    break
+
+    if not vel_cols:
+        for struct_name in ["velocity", "vel", "speed"]:
+            if struct_name in col_map:
+                for axis in ("x", "y", "z"):
+                    extracted = _extract_nested(df, col_map[struct_name], axis)
+                    if extracted is not None:
+                        tmp_col = f"_vel_{axis}"
+                        df = df.copy()
+                        df[tmp_col] = extracted
+                        vel_cols[axis] = tmp_col
+                if vel_cols:
+                    break
+
+    # If we still can't find basic columns, return minimal data
+    if not ts_col and not pos_cols:
+        logger.warning(
+            f"[ObstacleParser] Cannot find timestamp or position columns. "
+            f"Available: {list(df.columns)}"
+        )
+        # Return minimal obstacle info — just count and types
+        n_rows = len(df)
+        type_counts = {}
+        if type_col:
+            for t in df[type_col].dropna().unique():
+                type_counts[str(t)] = type_counts.get(str(t), 0) + 1
+
+        return {
+            "obstacles": [],
+            "closest_obstacle": None,
+            "obstacle_summary": f"{n_rows} rows, types: {type_counts}",
+            "raw_row_count": n_rows,
+        }
+
     # Build per-track obstacle entries
-    obstacles = []
     t0_s = t0_us * 1e-6
+    obstacles = []
 
-    for track_id, group in df_filtered.groupby(track_col):
-        group = group.sort_values(ts_col)
-        ts_track = ts_seconds[group.index]
+    # Group by track_id if available
+    if track_col:
+        groups = df.groupby(track_col)
+    else:
+        # No track_id — treat all rows as one group
+        groups = [(0, df)]
 
-        entry: dict[str, Any] = {"track_id": int(track_id)}
+    for track_id, group in groups:
+        entry: dict[str, Any] = {"track_id": int(track_id) if not isinstance(track_id, str) else hash(track_id) % 100000}
 
         # Object type
-        if type_col is not None:
-            entry["object_type"] = str(group[type_col].mode().iloc[0]) if len(group) > 0 else "unknown"
+        if type_col is not None and len(group) > 0:
+            try:
+                mode_val = group[type_col].mode()
+                entry["object_type"] = str(mode_val.iloc[0]) if len(mode_val) > 0 else "unknown"
+            except Exception:
+                entry["object_type"] = "unknown"
         else:
             entry["object_type"] = "unknown"
 
         # Positions
+        n = len(group)
         if len(pos_cols) >= 2:
-            positions = np.stack(
-                [group[pos_cols.get(axis, pos_cols.get("x"))].values.astype(np.float32)
-                 for axis in ("x", "y", "z") if axis in pos_cols],
-                axis=-1,
-            )
-            if positions.shape[-1] == 2:
-                positions = np.concatenate([positions, np.zeros((len(positions), 1))], axis=-1)
+            positions = np.zeros((n, 3), dtype=np.float32)
+            for i, axis in enumerate(("x", "y", "z")):
+                if axis in pos_cols:
+                    try:
+                        positions[:, i] = group[pos_cols[axis]].values.astype(np.float32)
+                    except Exception:
+                        pass
             entry["positions"] = positions
         else:
-            entry["positions"] = np.zeros((len(group), 3), dtype=np.float32)
+            entry["positions"] = np.zeros((n, 3), dtype=np.float32)
 
         # Velocities
         if vel_cols:
-            velocities = np.stack(
-                [group[vel_cols[axis]].values.astype(np.float32) for axis in ("x", "y", "z") if axis in vel_cols],
-                axis=-1,
-            )
-            if velocities.shape[-1] == 2:
-                velocities = np.concatenate([velocities, np.zeros((len(velocities), 1))], axis=-1)
+            velocities = np.zeros((n, 3), dtype=np.float32)
+            for i, axis in enumerate(("x", "y", "z")):
+                if axis in vel_cols:
+                    try:
+                        velocities[:, i] = group[vel_cols[axis]].values.astype(np.float32)
+                    except Exception:
+                        pass
             entry["velocities"] = velocities
         else:
-            entry["velocities"] = np.zeros((len(group), 3), dtype=np.float32)
+            entry["velocities"] = np.zeros((n, 3), dtype=np.float32)
 
         # Heading
         if heading_col is not None:
-            entry["heading"] = group[heading_col].values.astype(np.float32)
+            try:
+                entry["heading"] = group[heading_col].values.astype(np.float32)
+            except Exception:
+                entry["heading"] = np.zeros(n, dtype=np.float32)
         else:
-            entry["heading"] = np.zeros(len(group), dtype=np.float32)
+            entry["heading"] = np.zeros(n, dtype=np.float32)
 
         # BBox
         if bbox_cols:
-            entry["bbox_lwh"] = np.array(
-                [group[bbox_cols[dim]].values[0] for dim in ("length", "width", "height") if dim in bbox_cols],
-                dtype=np.float32,
-            )
+            lwh = [4.0, 2.0, 1.5]
+            for i, dim in enumerate(("length", "width", "height")):
+                if dim in bbox_cols:
+                    try:
+                        lwh[i] = float(group[bbox_cols[dim]].iloc[0])
+                    except Exception:
+                        pass
+            entry["bbox_lwh"] = np.array(lwh, dtype=np.float32)
         else:
             entry["bbox_lwh"] = np.array([4.0, 2.0, 1.5], dtype=np.float32)
 
-        # Distance to ego (assuming ego is at origin in ego frame)
+        # Distance to ego
         entry["distances"] = np.linalg.norm(entry["positions"][:, :2], axis=-1)
 
         # Timestamps relative to t0
-        entry["timestamps_rel"] = (ts_track - t0_s).astype(np.float32)
+        if ts_col is not None:
+            try:
+                ts_vals = group[ts_col].values.astype(np.float64)
+                if ts_vals.max() > 1e12:
+                    ts_seconds = ts_vals * 1e-6
+                elif ts_vals.max() > 1e9:
+                    ts_seconds = ts_vals * 1e-3
+                else:
+                    ts_seconds = ts_vals
+                entry["timestamps_rel"] = (ts_seconds - t0_s).astype(np.float32)
+            except Exception:
+                entry["timestamps_rel"] = np.zeros(n, dtype=np.float32)
+        else:
+            entry["timestamps_rel"] = np.zeros(n, dtype=np.float32)
 
         obstacles.append(entry)
 
-    # Find closest obstacle at t0 (closest timestamp to 0)
+    # Find closest obstacle at t0
     closest_obstacle = None
     min_dist = float("inf")
     for obs in obstacles:
-        # Find the frame closest to t0
-        t0_idx = np.argmin(np.abs(obs["timestamps_rel"]))
-        dist_at_t0 = obs["distances"][t0_idx]
+        t0_idx = int(np.argmin(np.abs(obs["timestamps_rel"])))
+        dist_at_t0 = float(obs["distances"][t0_idx])
         if dist_at_t0 < min_dist:
             min_dist = dist_at_t0
             closest_obstacle = {
                 "track_id": obs["track_id"],
                 "object_type": obs["object_type"],
-                "distance": float(dist_at_t0),
+                "distance": dist_at_t0,
                 "position": obs["positions"][t0_idx].tolist(),
                 "velocity": obs["velocities"][t0_idx].tolist(),
                 "heading": float(obs["heading"][t0_idx]),
             }
 
-    # Build summary string
+    # Build summary
     type_counts: dict[str, int] = {}
     for obs in obstacles:
         t = obs["object_type"]
@@ -314,55 +376,41 @@ def _parse_obstacle_df(
 def extract_scene_facts_from_obstacles(
     obstacle_data: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Extract verifiable scene facts from obstacle data for CoC grounding.
+    """Extract verifiable scene facts from obstacle data for CoC grounding."""
+    empty_facts = {
+        "has_vehicle_nearby": False,
+        "has_pedestrian_nearby": False,
+        "has_cyclist_nearby": False,
+        "closest_object_type": None,
+        "closest_distance": float("inf"),
+        "object_on_left": False,
+        "object_on_right": False,
+        "object_ahead": False,
+        "approaching_object": False,
+        "num_obstacles": 0,
+        "high_threat_objects": [],
+    }
 
-    Returns a dict of ground-truth facts that can be checked against
-    the CoC text:
-      - ``has_vehicle_nearby``: bool
-      - ``has_pedestrian_nearby``: bool
-      - ``has_cyclist_nearby``: bool
-      - ``closest_object_type``: str or None
-      - ``closest_distance``: float or inf
-      - ``object_on_left``: bool (closest object is to the left)
-      - ``object_on_right``: bool
-      - ``object_ahead``: bool
-      - ``approaching_object``: bool (relative velocity is negative)
-      - ``num_obstacles``: int
-      - ``high_threat_objects``: list of dicts
-    """
     if obstacle_data is None or not obstacle_data.get("obstacles"):
-        return {
-            "has_vehicle_nearby": False,
-            "has_pedestrian_nearby": False,
-            "has_cyclist_nearby": False,
-            "closest_object_type": None,
-            "closest_distance": float("inf"),
-            "object_on_left": False,
-            "object_on_right": False,
-            "object_ahead": False,
-            "approaching_object": False,
-            "num_obstacles": 0,
-            "high_threat_objects": [],
-        }
+        return empty_facts
 
     obstacles = obstacle_data["obstacles"]
     closest = obstacle_data.get("closest_obstacle")
 
-    # Classify object types
-    vehicle_types = {"vehicle", "car", "truck", "bus", "motorcycle", "4", "5", "6"}
+    vehicle_types = {"vehicle", "car", "truck", "bus", "motorcycle", "4", "5", "6",
+                     "sedan", "suv", "van", "pickup", "automobile"}
     pedestrian_types = {"pedestrian", "person", "ped", "1", "walker"}
-    cyclist_types = {"cyclist", "bicycle", "bike", "2", "3"}
+    cyclist_types = {"cyclist", "bicycle", "bike", "2", "3", "motorcyclist"}
 
     has_vehicle = False
     has_pedestrian = False
     has_cyclist = False
     high_threat: list[dict] = []
-
-    THREAT_DISTANCE = 30.0  # meters
+    THREAT_DISTANCE = 30.0
 
     for obs in obstacles:
-        obj_type = obs["object_type"].lower().strip()
-        min_dist = float(obs["distances"].min())
+        obj_type = str(obs.get("object_type", "")).lower().strip()
+        min_dist = float(np.min(obs.get("distances", [float("inf")])))
 
         if any(vt in obj_type for vt in vehicle_types):
             has_vehicle = True
@@ -372,24 +420,24 @@ def extract_scene_facts_from_obstacles(
             has_cyclist = True
 
         if min_dist < THREAT_DISTANCE:
-            # Check if approaching (velocity towards ego)
-            t0_idx = np.argmin(np.abs(obs["timestamps_rel"]))
-            vel = obs["velocities"][t0_idx]
-            pos = obs["positions"][t0_idx]
-            # Radial velocity: negative = approaching
-            dist = max(np.linalg.norm(pos[:2]), 0.1)
+            positions = obs.get("positions", np.zeros((1, 3)))
+            velocities = obs.get("velocities", np.zeros((1, 3)))
+            ts_rel = obs.get("timestamps_rel", np.zeros(1))
+            t0_idx = int(np.argmin(np.abs(ts_rel)))
+            pos = positions[min(t0_idx, len(positions) - 1)]
+            vel = velocities[min(t0_idx, len(velocities) - 1)]
+            dist = max(float(np.linalg.norm(pos[:2])), 0.1)
             radial_vel = float(np.dot(pos[:2], vel[:2]) / dist)
 
             high_threat.append({
-                "track_id": obs["track_id"],
-                "object_type": obs["object_type"],
+                "track_id": obs.get("track_id", 0),
+                "object_type": obs.get("object_type", "unknown"),
                 "distance": float(min_dist),
                 "position": pos.tolist(),
                 "radial_velocity": radial_vel,
                 "is_approaching": radial_vel < -0.5,
             })
 
-    # Spatial relationship of closest object
     obj_left = False
     obj_right = False
     obj_ahead = False
@@ -398,11 +446,10 @@ def extract_scene_facts_from_obstacles(
     closest_type = None
 
     if closest is not None:
-        pos = np.array(closest["position"][:2])
-        closest_dist = closest["distance"]
-        closest_type = closest["object_type"]
+        pos = np.array(closest.get("position", [0, 0, 0])[:2])
+        closest_dist = closest.get("distance", float("inf"))
+        closest_type = closest.get("object_type")
 
-        # In ego frame: x=forward, y=left
         if pos[1] > 0.5:
             obj_left = True
         elif pos[1] < -0.5:
@@ -410,7 +457,7 @@ def extract_scene_facts_from_obstacles(
         if pos[0] > 1.0:
             obj_ahead = True
 
-        vel = np.array(closest["velocity"][:2])
+        vel = np.array(closest.get("velocity", [0, 0, 0])[:2])
         if closest_dist > 0.1:
             radial = float(np.dot(pos, vel) / closest_dist)
             approaching = radial < -0.5

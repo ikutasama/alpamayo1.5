@@ -323,9 +323,7 @@ class RVLADataPacker(BaseRLDataPacker):
                 "ego_history_rot": data_dict["ego_history_rot"],
                 "cot": data_dict.get("cot", ""),
             }
-            # Pass obstacle data for grounded CoC reward (v2)
-            if "obstacle_data" in data_dict:
-                ref_dict["obstacle_data"] = data_dict["obstacle_data"]
+            # Pass scene_facts for grounded CoC reward (v2)
             if "scene_facts" in data_dict:
                 ref_dict["scene_facts"] = data_dict["scene_facts"]
 
