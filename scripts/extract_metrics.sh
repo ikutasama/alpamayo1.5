@@ -1,13 +1,13 @@
 #!/bin/bash
 # Alpamayo 1.5 RL Training Metrics Extraction Script
 # Usage: bash extract_metrics.sh
-# Output: prints report to stdout AND saves to /tmp/training_report.txt
+# Output: prints report to stdout AND saves to /root/temp_log/training_report.txt
 
-ROLL_LOG="/root/temp_log_0425/logs_20260525-102232/rollout_0.log"
-POLICY_LOG="/root/temp_log_0425/logs_20260525-102232/policy_0.log"
-CTRL_LOG="/root/temp_log_0425/logs_20260525-102232/controller.log"
-TB_PATH="/root/temp_log/tensorboard"
-R="/tmp/training_report.txt"
+ROLL_LOG="/root/temp_log_0425/logs_latest/rollout_0.log"
+POLICY_LOG="/root/temp_log_0425/logs_latest/policy_0.log"
+CTRL_LOG="/root/temp_log_0425/logs_latest/controller.log"
+TB_PATH=$(ls -t /root/temp_log/tensorboard/events.out.tfevents.* 2>/dev/null | head -1)
+R="/root/temp_log/training_report.txt"
 > "$R"
 
 echo "======== Alpamayo RL Training Report ========" | tee -a "$R"
@@ -22,8 +22,8 @@ for f in "$POLICY_LOG" "$ROLL_LOG" "$CTRL_LOG"; do
     echo "  MISSING  $f" | tee -a "$R"
   fi
 done
-if [ -d "$TB_PATH" ]; then
-  echo "  TB: $(ls "$TB_PATH"/events* 2>/dev/null | wc -l) files" | tee -a "$R"
+if [ -n "$TB_PATH" ]; then
+  echo "  TB: $TB_PATH" | tee -a "$R"
 fi
 echo "" | tee -a "$R"
 
@@ -66,7 +66,7 @@ echo "" | tee -a "$R"
 echo "=== 9. Obstacle status ===" | tee -a "$R"
 obs_count=$(grep -c "Failed to load obstacle" "$POLICY_LOG" 2>/dev/null || echo 0)
 echo "  obstacle load failures: $obs_count" | tee -a "$R"
-grep -i "obstacle" "$POLICY_LOG" "$ROLL_LOG" 2>/dev/null | head -3 | tee -a "$R"
+grep -i "obstacle" "$POLICY_LOG" "$ROLL_LOG" 2>/dev/null | head -5 | tee -a "$R"
 echo "" | tee -a "$R"
 
 echo "=== 10. Reward trend ===" | tee -a "$R"
@@ -76,12 +76,7 @@ echo "  first: $first_r" | tee -a "$R"
 echo "  last:  $last_r" | tee -a "$R"
 echo "" | tee -a "$R"
 
-echo "=== 11. GPU ===" | tee -a "$R"
-nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,temperature.gpu \
-  --format=csv,noheader 2>/dev/null | tee -a "$R"
-echo "" | tee -a "$R"
-
-echo "=== 12. TB Scalars ===" | tee -a "$R"
+echo "=== 11. TB Scalars ===" | tee -a "$R"
 python3 -c "
 try:
     from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
@@ -94,7 +89,11 @@ try:
             'train/reward_traj_L2_mean','train/reward_scene_understanding_mean',
             'train/reward_decision_alignment_mean','train/reward_coc_quality_mean',
             'train/cot_word_count_mean','train/unique_completion_ratio',
-            'train/reward_object_recall_mean','train/reward_format_score_mean']
+            'train/reward_object_recall_mean','train/reward_format_score_mean',
+            'train/reward_grounded_coc_reward_mean','train/reward_hallucination_score_mean',
+            'train/reward_spatial_accuracy_mean','train/reward_threat_score_mean',
+            'train/reward_coc_unique_ratio_mean','train/reward_diversity_score_mean',
+            'train/reward_gt_decision_alignment_mean']
     for t in keys:
         if t in tags:
             evts = ea.Scalars(t)[-10:]
@@ -103,13 +102,13 @@ try:
                 print(f'    step={e.step} val={e.value:.4f}')
     other = [t for t in tags if t not in keys]
     if other:
-        print(f'  Other ({len(other)}): {other[:20]}')
+        print(f'  Other ({len(other)}): {other[:30]}')
 except Exception as ex:
     print(f'  TB dump failed: {ex}')
 " 2>&1 | tee -a "$R"
 echo "" | tee -a "$R"
 
-echo "=== 13. Quick Health Check ===" | tee -a "$R"
+echo "=== 12. Quick Health Check ===" | tee -a "$R"
 total_steps=$(grep -c "\[Step " "$POLICY_LOG" 2>/dev/null || echo "0")
 echo "  Total training steps: $total_steps" | tee -a "$R"
 if [ "$total_steps" -gt 0 ] && [ -n "$first_r" ] && [ -n "$last_r" ]; then
