@@ -397,10 +397,9 @@ def extract_scene_facts_from_obstacles(
     obstacles = obstacle_data["obstacles"]
     closest = obstacle_data.get("closest_obstacle")
 
-    vehicle_types = {"vehicle", "car", "truck", "bus", "motorcycle", "4", "5", "6",
-                     "sedan", "suv", "van", "pickup", "automobile"}
-    pedestrian_types = {"pedestrian", "person", "ped", "1", "walker"}
-    cyclist_types = {"cyclist", "bicycle", "bike", "2", "3", "motorcyclist"}
+    vehicle_types = {"vehicle", "car", "truck", "bus", "motorcycle", "sedan", "suv", "van", "pickup"}
+    pedestrian_types = {"pedestrian", "person", "ped", "walker"}
+    cyclist_types = {"cyclist", "bicycle", "bike", "motorcyclist"}
 
     has_vehicle = False
     has_pedestrian = False
@@ -409,15 +408,32 @@ def extract_scene_facts_from_obstacles(
     THREAT_DISTANCE = 30.0
 
     for obs in obstacles:
-        obj_type = str(obs.get("object_type", "")).lower().strip()
-        min_dist = float(np.min(obs.get("distances", [float("inf")])))
+        obj_type_raw = obs.get("object_type", "")
+        # Handle both string and integer types
+        if isinstance(obj_type_raw, (int, float)):
+            # Common PAI dataset encoding: 0=vehicle, 1=pedestrian, 2=cyclist, etc.
+            obj_type_int = int(obj_type_raw)
+            if obj_type_int == 0 or obj_type_int in [4, 5, 6, 7, 8]:  # Various vehicle types
+                has_vehicle = True
+                obj_type = "vehicle"
+            elif obj_type_int == 1 or obj_type_int == 9:  # Pedestrian
+                has_pedestrian = True
+                obj_type = "pedestrian"
+            elif obj_type_int == 2 or obj_type_int == 3:  # Cyclist
+                has_cyclist = True
+                obj_type = "cyclist"
+            else:
+                obj_type = f"type_{obj_type_int}"
+        else:
+            obj_type = str(obj_type_raw).lower().strip()
+            if any(vt in obj_type for vt in vehicle_types):
+                has_vehicle = True
+            if any(pt in obj_type for pt in pedestrian_types):
+                has_pedestrian = True
+            if any(ct in obj_type for ct in cyclist_types):
+                has_cyclist = True
 
-        if any(vt in obj_type for vt in vehicle_types):
-            has_vehicle = True
-        if any(pt in obj_type for pt in pedestrian_types):
-            has_pedestrian = True
-        if any(ct in obj_type for ct in cyclist_types):
-            has_cyclist = True
+        min_dist = float(np.min(obs.get("distances", [float("inf")])))
 
         if min_dist < THREAT_DISTANCE:
             positions = obs.get("positions", np.zeros((1, 3)))

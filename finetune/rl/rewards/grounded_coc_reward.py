@@ -85,24 +85,33 @@ DECISION_PATTERNS: dict[str, list[str]] = {
         r"\bbrak(?:e|ing)\b",
     ],
     "maintain": [
-        r"\bmaintain(?:ing)? (?:speed|course)\b",
-        r"\bkeep(?:ing)? (?:speed|going|moving)\b",
+        r"\bmaintain(?:ing)?(?:\s+\w+)?\b",
+        r"\bkeep(?:ing)?(?:\s+\w+)?\b",
         r"\bcontinue\b",
         r"\bsteady\b",
+        r"\bfollow(?:ing)?\b",
+        r"\bstay in (?:the )?lane\b",
+        r"\bkeep (?:the )?(?:current )?lane\b",
+        r"\bhold (?:the )?(?:current )?(?:speed|lane|position)\b",
     ],
     "accelerate": [
         r"\baccelerat(?:e|ing)\b",
         r"\bspeed(?:ing)? up\b",
         r"\bproceed\b",
         r"\bmove forward\b",
+        r"\bgain speed\b",
     ],
     "nudge_left": [
-        r"\b(?:nudge|shift|move|steer) (?:to the )?left\b",
+        r"\b(?:nudge|shift|move|steer|change) (?:to the )?left\b",
         r"\bleft lane change\b",
+        r"\bmerge (?:to the )?left\b",
+        r"\bchange to (?:the )?left lane\b",
     ],
     "nudge_right": [
-        r"\b(?:nudge|shift|move|steer) (?:to the )?right\b",
+        r"\b(?:nudge|shift|move|steer|change) (?:to the )?right\b",
         r"\bright lane change\b",
+        r"\bmerge (?:to the )?right\b",
+        r"\bchange to (?:the )?right lane\b",
     ],
 }
 
