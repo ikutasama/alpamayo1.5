@@ -175,7 +175,21 @@ class PAIDataset(Dataset):
                     # prefetch shared memory serialization)
                     if "scene_facts" in obstacle_info:
                         sample_data["scene_facts"] = obstacle_info["scene_facts"]
-            except Exception:
-                pass  # Obstacle loading is optional; failures are non-fatal
+                        # Debug: log first few successful loads
+                        if not hasattr(self, "_obstacle_success_count"):
+                            self._obstacle_success_count = 0
+                        self._obstacle_success_count += 1
+                        if self._obstacle_success_count <= 3:
+                            print(f"[PAIDataset] idx={idx} clip={clip_id}: scene_facts loaded, "
+                                  f"num_obstacles={obstacle_info['scene_facts'].get('num_obstacles', 'N/A')}",
+                                  flush=True)
+            except Exception as e:
+                # Log first few failures for debugging
+                if not hasattr(self, "_obstacle_fail_count"):
+                    self._obstacle_fail_count = 0
+                self._obstacle_fail_count += 1
+                if self._obstacle_fail_count <= 5:
+                    print(f"[PAIDataset] idx={idx} clip={clip_id}: obstacle load failed: {e}",
+                          flush=True)
 
         return sample_data
