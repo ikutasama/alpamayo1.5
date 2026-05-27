@@ -160,7 +160,7 @@ def _parse_obstacle_df(
     # Find object_type column
     type_col = None
     for candidate in ["object_type", "type", "class", "category", "label",
-                       "agent_type", "object_class"]:
+                       "agent_type", "object_class", "label_class"]:
         if candidate in col_map:
             type_col = col_map[candidate]
             break
@@ -199,6 +199,29 @@ def _parse_obstacle_df(
             if candidate in col_map:
                 bbox_cols[dim] = col_map[candidate]
                 break
+    # PAI dataset uses size_x, size_y, size_z
+    if not bbox_cols:
+        axis_to_dim = {"x": "length", "y": "width", "z": "height"}
+        for axis, dim in axis_to_dim.items():
+            if f"size_{axis}" in col_map:
+                bbox_cols[dim] = col_map[f"size_{axis}"]
+
+    # Compute heading from quaternion if available (orientation_x/y/z/w)
+    quat_cols = {}
+    for q in ("x", "y", "z", "w"):
+        if f"orientation_{q}" in col_map:
+            quat_cols[q] = col_map[f"orientation_{q}"]
+    if len(quat_cols) == 4 and heading_col is None:
+        # heading = yaw from quaternion: atan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
+        qx = df[quat_cols["x"]].values.astype(np.float64)
+        qy = df[quat_cols["y"]].values.astype(np.float64)
+        qz = df[quat_cols["z"]].values.astype(np.float64)
+        qw = df[quat_cols["w"]].values.astype(np.float64)
+        heading_vals = np.arctan2(2.0 * (qw * qz + qx * qy),
+                                   1.0 - 2.0 * (qy * qy + qz * qz))
+        df = df.copy()
+        df["_computed_heading"] = heading_vals
+        heading_col = "_computed_heading"
 
     # Check for nested struct columns (e.g., "position" as struct{x,y,z})
     if not pos_cols:
@@ -397,7 +420,8 @@ def extract_scene_facts_from_obstacles(
     obstacles = obstacle_data["obstacles"]
     closest = obstacle_data.get("closest_obstacle")
 
-    vehicle_types = {"vehicle", "car", "truck", "bus", "motorcycle", "sedan", "suv", "van", "pickup"}
+    vehicle_types = {"vehicle", "car", "truck", "bus", "motorcycle", "sedan", "suv", "van", "pickup",
+                     "automobile", "heavy_truck", "trailer", "other_vehicle"}
     pedestrian_types = {"pedestrian", "person", "ped", "walker"}
     cyclist_types = {"cyclist", "bicycle", "bike", "motorcyclist"}
 
