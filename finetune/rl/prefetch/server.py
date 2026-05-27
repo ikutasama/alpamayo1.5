@@ -67,6 +67,7 @@ ROLLOUT_KEEP_KEYS: tuple[str, ...] = (
     "ego_history_rot",
     "cot",
     "meta_action_strings",
+    "scene_facts",  # For grounded CoC reward (v2)
 )
 
 # shm marker is imported from `prefetch_shm` as `_SHM_TAG`.
