@@ -145,13 +145,13 @@ anti_template_weight = 0.05
 enable_hcc = true
 
 # Layer 2 weight: CoC reasoning quality (0.0-1.0, share of total reward)
-coc_quality_weight = 0.30
+coc_quality_weight = 0.20
 
 # Layer 3 weight: Decision-GT Alignment (was RAA, 0.0-1.0)
-raa_weight = 0.25
+raa_weight = 0.20
 
 # Layer 1 reward weight for additive formula (0.0-1.0)
-scene_reward_weight = 0.15
+scene_reward_weight = 0.10
 
 # Layer 1 threshold: Scene understanding minimum score to pass gating
 scene_threshold = 0.2

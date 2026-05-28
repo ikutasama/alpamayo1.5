@@ -239,6 +239,26 @@ def compute_hcc_v2_reward(
     )
 
     # ============================================================
+    # Anti-conservative penalty: force CoC to mention obstacles
+    # ============================================================
+    # If scene has vehicles/pedestrians but CoC doesn't mention them,
+    # penalize to prevent "conservative strategy" (silence = no mistakes)
+    anti_conservative_penalty = 0.0
+    has_real_obstacles = scene_facts.get("num_obstacles", 0) > 5
+    has_vehicle = scene_facts.get("has_vehicle_nearby", False)
+    has_pedestrian = scene_facts.get("has_pedestrian_nearby", False)
+    object_recall = grounded_metrics.get("object_recall", 0.0)
+    
+    if has_real_obstacles and (has_vehicle or has_pedestrian):
+        # Scene has obstacles, check if CoC mentions them
+        if object_recall < 0.3:
+            # CoC barely mentions obstacles → penalty
+            anti_conservative_penalty = -0.15 * (1.0 - object_recall)
+        elif object_recall < 0.6:
+            # Partial mention → smaller penalty
+            anti_conservative_penalty = -0.08 * (1.0 - object_recall)
+
+    # ============================================================
     # Layer 4: Trajectory Quality (ADE + Comfort, unchanged)
     # ============================================================
     l2_dist = calculate_ade(predicted_fut_xyz[0], gt_fut_xyz[0])
@@ -285,17 +305,21 @@ def compute_hcc_v2_reward(
     # Format bonus/penalty
     format_bonus = 0.03 * (2.0 * format_score - 1.0)
     final_reward += format_bonus
+    
+    # Apply anti-conservative penalty
+    final_reward += anti_conservative_penalty
 
     if not (isinstance(final_reward, (int, float)) and math.isfinite(final_reward)):
         final_reward = 0.0
     final_reward = float(max(-1.0, min(1.0, final_reward)))
 
     # Print reward breakdown for debugging
+    penalty_str = f" penalty={anti_conservative_penalty:+.3f}" if abs(anti_conservative_penalty) > 0.001 else ""
     print(f"[HCC-v2] Layers: scene={s1_scene:.3f}(w={scene_w:.2f}) "
           f"decision={s2_decision:.3f}(w={raa_w:.2f}) "
           f"coc_q={s3_coc:.3f}(w={coc_w:.2f}) "
           f"traj={s4_combined:.3f}(w={traj_w:.2f}) "
-          f"l2={l2_dist:.2f} → R={final_reward:.4f}", flush=True)
+          f"l2={l2_dist:.2f}{penalty_str} → R={final_reward:.4f}", flush=True)
 
     # ============================================================
     # Build reward dict for logging
@@ -317,6 +341,8 @@ def compute_hcc_v2_reward(
         # Grounded metrics
         "object_recall": float(grounded_metrics.get("object_recall", 0.0)),
         "grounded_coc_reward": float(grounded_metrics.get("grounded_coc_reward", 0.0)),
+        # Anti-conservative penalty
+        "anti_conservative_penalty": float(anti_conservative_penalty),
         # GT decision info
         "gt_decision_alignment": float(s2_decision),
         # Final
