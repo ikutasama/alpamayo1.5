@@ -59,9 +59,9 @@ quantization = "none"
 seed = 42
 
 [rollout.sampling_config]
-temperature = 0.8
+temperature = 1.0
 top_p = 0.95
-repetition_penalty = 1.05
+repetition_penalty = 1.1
 # stop_strings = ["<|traj_future_end|>", "<|endoftext|>"]
 max_new_tokens = 256
 

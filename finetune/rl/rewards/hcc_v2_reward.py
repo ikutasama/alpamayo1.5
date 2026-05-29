@@ -232,14 +232,35 @@ def compute_hcc_v2_reward(
     else:
         length_quality = 0.1  # Severely penalize 50+ words
 
+    # Specificity bonus: reward CoC that mention specific scene details
+    # Check for specific action verbs, object types, spatial descriptions
+    specificity_keywords = [
+        # Specific actions
+        "nudge", "merge", "yield", "brake", "accelerate", "decelerate",
+        "turn", "curve", "intersection", "crosswalk", "stop sign",
+        # Specific objects
+        "vehicle", "car", "truck", "bus", "motorcycle", "pedestrian", "cyclist",
+        "traffic light", "signal", "lane",
+        # Spatial descriptions
+        "left", "right", "ahead", "behind", "beside", "approaching",
+        # Specific scenarios
+        "cut-in", "blocking", "entering", "crossing", "parked"
+    ]
+    
+    coc_lower = coc_text.lower()
+    specificity_count = sum(1 for kw in specificity_keywords if kw in coc_lower)
+    # Bonus for using 3+ specific keywords, max bonus at 6+
+    specificity_bonus = min(1.0, max(0.0, (specificity_count - 2) / 4.0))
+
     # Diversity quality
     diversity_quality = min(1.0, unique_ratio / 0.65)
-
+    
+    # CoC quality: format + length + diversity + specificity
     s3_coc = (
-        0.2 * format_quality
-        + 0.3 * length_quality
-        + 0.3 * diversity_quality
-        + 0.2 * min(1.0, grounded_metrics.get("object_recall", 0.0))
+        0.15 * format_quality +
+        0.35 * length_quality +
+        0.30 * diversity_quality +
+        0.20 * specificity_bonus
     )
 
     # ============================================================
@@ -334,7 +355,7 @@ def compute_hcc_v2_reward(
           f"decision={s2_decision:.3f}(w={raa_w:.2f}) "
           f"coc_q={s3_coc:.3f}(w={coc_w:.2f}) "
           f"traj={s4_combined:.3f}(w={traj_w:.2f}) "
-          f"l2={l2_dist:.2f}{penalty_str} → R={final_reward:.4f}", flush=True)
+          f"l2={l2_dist:.2f} spec={specificity_bonus:.2f}{penalty_str} → R={final_reward:.4f}", flush=True)
 
     # ============================================================
     # Build reward dict for logging
@@ -350,6 +371,7 @@ def compute_hcc_v2_reward(
         "cot_word_count": float(word_count),
         "coc_unique_ratio": float(unique_ratio),
         "diversity_score": float(diversity_quality),
+        "specificity_bonus": float(specificity_bonus),
         # Trajectory
         "traj_L2": float(l2_dist),
         "comfort_reward": float(comfort_score),
