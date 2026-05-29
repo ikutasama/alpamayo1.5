@@ -53,8 +53,7 @@ n_generation = 6
 backend = "reasoning_vla_vllm_rollout"
 gpu_memory_utilization = 0.6
 enable_chunked_prefill = false
-n_generation = 12
-batch_size = 2
+n_generation = 8
 n_generation_to_batch = true
 quantization = "none"
 seed = 42
@@ -64,7 +63,7 @@ temperature = 0.8
 top_p = 0.95
 repetition_penalty = 1.05
 # stop_strings = ["<|traj_future_end|>", "<|endoftext|>"]
-max_new_tokens = 384
+max_new_tokens = 256
 
 [policy]
 # ReasoningVLA HF checkpoint directory (must include ReasoningVLAConfig)
