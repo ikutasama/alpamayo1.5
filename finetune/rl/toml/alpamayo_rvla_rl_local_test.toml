@@ -102,7 +102,7 @@ save_mode = "async"
 max_keep = 10
 
 [rollout.parallelism]
-n_init_replicas = 2
+n_init_replicas = 1
 tp_size = 1
 cp_size = 1
 dp_shard_size = 1
@@ -143,11 +143,11 @@ anti_template_weight = 0.05
 # These are used when enable_hcc_v2 = false or obstacle data is unavailable.
 enable_hcc = true
 
-# Layer 2 weight: CoC reasoning quality (0.0-1.0, share of total reward)
-coc_quality_weight = 0.20
+# CoC quality weight (format + length + diversity + specificity)
+coc_quality_weight = 0.15
 
-# Layer 3 weight: Decision-GT Alignment (was RAA, 0.0-1.0)
-raa_weight = 0.20
+# Reasoning-Action Alignment (decision alignment between CoC and trajectory)
+raa_weight = 0.30
 
 # Layer 1 reward weight for additive formula (0.0-1.0)
 scene_reward_weight = 0.10
