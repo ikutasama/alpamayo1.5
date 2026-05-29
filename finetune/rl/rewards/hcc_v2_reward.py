@@ -246,7 +246,7 @@ def compute_hcc_v2_reward(
     # Anti-conservative penalty: force CoC to mention obstacles
     # ============================================================
     # If scene has vehicles/pedestrians but CoC doesn't mention them,
-    # penalize to prevent "conservative strategy" (silence = no mistakes)
+    # mildly penalize to encourage obstacle awareness (gentle, not dominating)
     anti_conservative_penalty = 0.0
     has_real_obstacles = scene_facts.get("num_obstacles", 0) > 5
     has_vehicle = scene_facts.get("has_vehicle_nearby", False)
@@ -256,11 +256,11 @@ def compute_hcc_v2_reward(
     if has_real_obstacles and (has_vehicle or has_pedestrian):
         # Scene has obstacles, check if CoC mentions them
         if object_recall < 0.3:
-            # CoC barely mentions obstacles → penalty
-            anti_conservative_penalty = -0.15 * (1.0 - object_recall)
+            # CoC barely mentions obstacles → small penalty
+            anti_conservative_penalty = -0.05 * (1.0 - object_recall)
         elif object_recall < 0.6:
-            # Partial mention → smaller penalty
-            anti_conservative_penalty = -0.08 * (1.0 - object_recall)
+            # Partial mention → tiny penalty
+            anti_conservative_penalty = -0.02 * (1.0 - object_recall)
 
     # ============================================================
     # Layer 4: Trajectory Quality (ADE + Comfort, unchanged)
