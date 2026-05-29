@@ -216,17 +216,21 @@ def compute_hcc_v2_reward(
     # Format compliance
     format_quality = format_score
 
-    # Length quality (sweet spot: 15-50 words)
-    if word_count < 5:
-        length_quality = 0.1
+    # Length quality (sweet spot: 20-30 words)
+    if word_count < 10:
+        length_quality = 0.2
     elif word_count < 15:
-        length_quality = 0.3 + 0.7 * (word_count - 5) / 10.0
+        length_quality = 0.3 + 0.3 * (word_count - 10) / 5.0
+    elif word_count < 20:
+        length_quality = 0.6 + 0.4 * (word_count - 15) / 5.0
+    elif word_count <= 30:
+        length_quality = 1.0  # Sweet spot
+    elif word_count <= 40:
+        length_quality = 1.0 - 0.5 * (word_count - 30) / 10.0
     elif word_count <= 50:
-        length_quality = 1.0
-    elif word_count <= 80:
-        length_quality = 0.8
+        length_quality = 0.5 - 0.4 * (word_count - 40) / 10.0
     else:
-        length_quality = 0.6  # Penalize excessively long CoC
+        length_quality = 0.1  # Severely penalize 50+ words
 
     # Diversity quality
     diversity_quality = min(1.0, unique_ratio / 0.65)
@@ -308,13 +312,24 @@ def compute_hcc_v2_reward(
     
     # Apply anti-conservative penalty
     final_reward += anti_conservative_penalty
+    
+    # Hard penalty for extremely long CoC (>80 words)
+    # Apply hard penalty for excessive length (>50 words)
+    length_hard_penalty = 0.0
+    if word_count > 50:
+        length_hard_penalty = -0.3 * min((word_count - 50) / 30, 1.0)
+        final_reward += length_hard_penalty
 
     if not (isinstance(final_reward, (int, float)) and math.isfinite(final_reward)):
         final_reward = 0.0
     final_reward = float(max(-1.0, min(1.0, final_reward)))
 
     # Print reward breakdown for debugging
-    penalty_str = f" penalty={anti_conservative_penalty:+.3f}" if abs(anti_conservative_penalty) > 0.001 else ""
+    penalty_str = ""
+    if abs(anti_conservative_penalty) > 0.001:
+        penalty_str = f" penalty={anti_conservative_penalty:+.3f}"
+    if word_count > 80:
+        penalty_str += f" length_penalty={length_hard_penalty:+.3f}"
     print(f"[HCC-v2] Layers: scene={s1_scene:.3f}(w={scene_w:.2f}) "
           f"decision={s2_decision:.3f}(w={raa_w:.2f}) "
           f"coc_q={s3_coc:.3f}(w={coc_w:.2f}) "
