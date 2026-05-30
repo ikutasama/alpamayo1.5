@@ -92,23 +92,45 @@ DRIVING_DIMENSIONS: dict[str, list[str]] = {
 }
 
 
+def _strip_image_tokens(text: str) -> str:
+    """Remove trajectory/image placeholder tokens (<i...>) and leaked special tokens from CoC text.
+
+    The VLA model sometimes generates <i{N}> tokens (trajectory discrete tokens)
+    in the CoC reasoning section, which corrupt both the text and downstream
+    token count calculations. This strips them out to recover the actual
+    reasoning content.
+    """
+    # Remove <i{number}> tokens (trajectory vocabulary placeholders)
+    text = re.sub(r"<i\d+>", "", text)
+    # Remove <|answer_end|> and any other leaked special tokens in the CoC section
+    text = re.sub(r"<\|answer_end\|>", "", text)
+    # Remove <|...|> special tokens that shouldn't appear in CoC text
+    text = re.sub(r"<\|(?:cot_end|traj_future_start|traj_future_end|meta_action_start|meta_action_end|answer_start)\|>", "", text)
+    # Clean up multiple spaces left by removal
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    return text
+
+
 def extract_coc_text(to_be_evaluated: str) -> str:
     """Extract the Chain-of-Causation reasoning text from a rollout completion.
 
     The CoC text is the portion before ``<|cot_end|>``.
+    Image/trajectory tokens (<i...>) are stripped to prevent corruption.
 
     Args:
         to_be_evaluated: The full rollout completion string.
 
     Returns:
-        The extracted CoC text, or empty string if not found.
+        The extracted CoC text (cleaned of image tokens), or empty string if not found.
     """
+    coc = ""
     if "<|cot_end|>" in to_be_evaluated:
-        return to_be_evaluated.split("<|cot_end|>")[0].strip()
-    # Fallback: if no cot_end marker, try to get text before traj_future_start
-    if "<|traj_future_start|>" in to_be_evaluated:
-        return to_be_evaluated.split("<|traj_future_start|>")[0].strip()
-    return to_be_evaluated.strip()
+        coc = to_be_evaluated.split("<|cot_end|>")[0].strip()
+    elif "<|traj_future_start|>" in to_be_evaluated:
+        coc = to_be_evaluated.split("<|traj_future_start|>")[0].strip()
+    else:
+        coc = to_be_evaluated.strip()
+    return _strip_image_tokens(coc)
 
 
 def score_factual_accuracy(coc_text: str) -> float:
@@ -371,6 +393,8 @@ def extract_coc_sections(to_be_evaluated: str) -> dict[str, str | float]:
         cot_start if cot_start in to_be_evaluated else None,
         cot_end,
     )
+    # Strip trajectory/image placeholder tokens from CoC reasoning text
+    reasoning = _strip_image_tokens(reasoning)
     traj_text = _between(to_be_evaluated, traj_start, traj_end)
     format_score = (
         float(has_cot_end) * 0.4
@@ -378,6 +402,15 @@ def extract_coc_sections(to_be_evaluated: str) -> dict[str, str | float]:
         + float(has_traj_end) * 0.2
     )
     format_score += float(ordered) * 0.1
+    # Penalize image token pollution: if the original text contained <i...> tokens,
+    # the CoC is malformed and should score lower
+    has_image_token_pollution = bool(re.search(r"<i\d+>", _between(
+        to_be_evaluated,
+        cot_start if cot_start in to_be_evaluated else None,
+        cot_end,
+    )))
+    if has_image_token_pollution:
+        format_score = min(format_score, 0.2)  # cap at 0.2 max for polluted CoC
 
     return {
         "reasoning": reasoning,
@@ -386,6 +419,7 @@ def extract_coc_sections(to_be_evaluated: str) -> dict[str, str | float]:
         "has_traj_start": float(has_traj_start),
         "has_traj_end": float(has_traj_end),
         "format_score": min(1.0, format_score),
+        "has_image_token_pollution": float(has_image_token_pollution),
     }
 
 

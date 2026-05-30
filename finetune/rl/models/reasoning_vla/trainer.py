@@ -168,9 +168,46 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
             advantages_t = advantages_t.clone()
             advantages_t[nan_mask] = 0.0
 
-        # Apply variance protection: amplify low-variance advantages
         vp_cfg = self._get_variance_protection_cfg()
-        if vp_cfg.get("enable_rank_advantages", False) or vp_cfg.get("min_group_std", 0.0) > 0:
+
+        # === RANK-BASED ADVANTAGES ===
+        # When enable_rank_advantages=True, use rank ordering instead of z-score.
+        # This preserves relative ordering even when reward variance collapses,
+        # and prevents advantage ≈ 0 that kills gradient updates.
+        if vp_cfg.get("enable_rank_advantages", False):
+            n = advantages_t.numel()
+            # Sort and assign fractional ranks (0 to n-1)
+            sorted_indices = torch.argsort(advantages_t)
+            ranks = torch.zeros_like(advantages_t, dtype=torch.float32)
+            ranks[sorted_indices] = torch.arange(n, dtype=torch.float32, device=advantages_t.device)
+
+            # Normalize ranks to [-1, 1] centered at 0
+            # This gives: best sample gets +1, worst gets -1, median gets ~0
+            normalized_ranks = (ranks - (n - 1) / 2.0) / ((n - 1) / 2.0 + 1e-8)
+
+            # Scale by a fixed magnitude so gradients are meaningful
+            # rank_scale controls the effective advantage magnitude
+            rank_scale = vp_cfg.get("rank_scale", 1.0)
+            advantages_t = normalized_ranks * rank_scale
+
+            logger.warning(
+                f"[VarProtect] step={step}: rank-based advantages "
+                f"(n={n}, rank_scale={rank_scale}, "
+                f"adv_mean={advantages_t.mean().item():.4f}, "
+                f"adv_std={advantages_t.std().item():.4f})"
+            )
+
+            # Still skip if all advantages are identical (no useful signal)
+            raw_std = advantages_t.std().item()
+            skip_std = vp_cfg.get("skip_update_std", 0.005)
+            if raw_std < skip_std and n > 1:
+                logger.warning(
+                    f"[VarProtect] step={step}: advantages too uniform "
+                    f"(std={raw_std:.6f}), zeroing"
+                )
+                advantages_t = torch.zeros_like(advantages_t)
+        else:
+            # Legacy z-score normalization (only used when rank_advantages=False)
             min_std = vp_cfg.get("min_group_std", 0.05)
             amplify_factor = vp_cfg.get("amplify_factor", 3.0)
             raw_std = advantages_t.std().item()
@@ -178,12 +215,11 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                 ratio = min(min_std / raw_std, amplify_factor)
                 advantages_t = advantages_t * ratio
                 if step % 5 == 0:
-                    logger.info(
+                    logger.warning(
                         f"[VarProtect] step={step}: amplified advantages by {ratio:.2f}x "
                         f"(raw_std={raw_std:.6f} < min_std={min_std})"
                     )
 
-            # Check if we should skip this update entirely
             skip_std = vp_cfg.get("skip_update_std", 0.005)
             if raw_std < skip_std:
                 logger.warning(
@@ -192,33 +228,34 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                 )
                 advantages_t = torch.zeros_like(advantages_t)
 
-        eps = cfg.get("eps", 1e-8)
-        clip_value = cfg.get("clip_value", 3.0)
-        use_running_stats = cfg.get("use_running_stats", False)
+            eps = cfg.get("eps", 1e-8)
+            clip_value = cfg.get("clip_value", 3.0)
+            use_running_stats = cfg.get("use_running_stats", False)
 
-        mean = advantages_t.mean().item()
-        std = max(advantages_t.std().item(), eps)
+            mean = advantages_t.mean().item()
+            std = max(advantages_t.std().item(), eps)
 
-        if use_running_stats:
-            prev_mean = getattr(self, "_adv_mean", mean)
-            prev_std = getattr(self, "_adv_std", std)
-            alpha = cfg.get("ema_alpha", 0.99)
-            mean = alpha * prev_mean + (1 - alpha) * mean
-            std = alpha * prev_std + (1 - alpha) * std
-            self._adv_mean = mean
-            self._adv_std = std
+            if use_running_stats:
+                prev_mean = getattr(self, "_adv_mean", mean)
+                prev_std = getattr(self, "_adv_std", std)
+                alpha = cfg.get("ema_alpha", 0.99)
+                mean = alpha * prev_mean + (1 - alpha) * mean
+                std = alpha * prev_std + (1 - alpha) * std
+                self._adv_mean = mean
+                self._adv_std = std
 
-        normalized = (advantages_t - mean) / std
-        if clip_value > 0:
-            normalized = torch.clamp(normalized, -clip_value, clip_value)
+            advantages_t = (advantages_t - mean) / std
+            if clip_value > 0:
+                advantages_t = torch.clamp(advantages_t, -clip_value, clip_value)
 
-        if step % 10 == 0:
-            logger.info(
-                f"[AdvNorm] step={step}: raw mean={mean:.4f}, std={std:.4f} "
-                f"-> norm mean={normalized.mean().item():.4f}, std={normalized.std().item():.4f}, "
-                f"clip=[-{clip_value},+{clip_value}]"
-            )
-        return normalized
+            if step % 10 == 0:
+                logger.warning(
+                    f"[AdvNorm] step={step}: raw mean={mean:.4f}, std={std:.4f} "
+                    f"-> norm mean={advantages_t.mean().item():.4f}, "
+                    f"std={advantages_t.std().item():.4f}"
+                )
+
+        return advantages_t
 
     def _get_variance_protection_cfg(self) -> dict[str, Any]:
         """Extract variance protection config from TOML [custom.alpamayo.variance_protection]."""

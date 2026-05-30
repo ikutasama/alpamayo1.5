@@ -177,12 +177,14 @@ eps = 1e-8
 [custom.alpamayo.variance_protection]
 # Enable rank-based advantages (preserves ordering even when rewards collapse)
 enable_rank_advantages = true
-# Amplify advantages when group std is below this threshold
-min_group_std = 0.05
-# Maximum amplification factor
-amplify_factor = 3.0
+# Scale factor for rank-based advantages: controls effective advantage magnitude
+# Higher values = stronger gradient signal. 1.0 gives [-1,+1] range.
+rank_scale = 1.0
 # Skip gradient update if ALL groups have std below this (prevents noise training)
 skip_update_std = 0.005
+# Legacy params (only used when rank_advantages=false)
+min_group_std = 0.05
+amplify_factor = 3.0
 # Enable completion diversity bonus
 enable_diversity_bonus = true
 # Weight for diversity bonus in reward
