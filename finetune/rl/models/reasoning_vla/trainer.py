@@ -154,7 +154,7 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         super().__init__(*args, **kwargs)
         self._tb_writer = None
 
-    def _normalize_advantages(self, advantages_t: torch.Tensor, step: int) -> torch.Tensor:
+    def _normalize_advantages(self, advantages_t: torch.Tensor, step: int, payloads: list[Any] = None) -> torch.Tensor:
         cfg = self._get_advantage_normalization_cfg()
         if not cfg.get("enable", True):
             return advantages_t
@@ -170,29 +170,55 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
 
         vp_cfg = self._get_variance_protection_cfg()
 
-        # === RANK-BASED ADVANTAGES ===
+        # === RANK-BASED ADVANTAGES (per-prompt group) ===
         # When enable_rank_advantages=True, use rank ordering instead of z-score.
         # This preserves relative ordering even when reward variance collapses,
         # and prevents advantage ≈ 0 that kills gradient updates.
+        # Ranks are computed WITHIN each prompt group (same prompt → n_generation completions),
+        # not globally, to match GRPO's per-group advantage semantics.
         if vp_cfg.get("enable_rank_advantages", False):
-            n = advantages_t.numel()
-            # Sort and assign fractional ranks (0 to n-1)
-            sorted_indices = torch.argsort(advantages_t)
-            ranks = torch.zeros_like(advantages_t, dtype=torch.float32)
-            ranks[sorted_indices] = torch.arange(n, dtype=torch.float32, device=advantages_t.device)
-
-            # Normalize ranks to [-1, 1] centered at 0
-            # This gives: best sample gets +1, worst gets -1, median gets ~0
-            normalized_ranks = (ranks - (n - 1) / 2.0) / ((n - 1) / 2.0 + 1e-8)
-
-            # Scale by a fixed magnitude so gradients are meaningful
-            # rank_scale controls the effective advantage magnitude
             rank_scale = vp_cfg.get("rank_scale", 1.0)
-            advantages_t = normalized_ranks * rank_scale
+            n = advantages_t.numel()
+
+            # Build prompt groups from payloads (same as _normalize_grouped)
+            groups: dict[tuple[str, str], list[int]] = {}
+            if payloads is not None:
+                for idx, payload in enumerate(payloads):
+                    if isinstance(payload, dict):
+                        key = (str(payload.get("split", "")), str(payload.get("idx", idx)))
+                    else:
+                        key = ("", str(idx))
+                    groups.setdefault(key, []).append(idx)
+
+            # If no group info available, treat all as one group
+            if not groups:
+                groups = {("all", "all"): list(range(n))}
+
+            result = torch.zeros_like(advantages_t, dtype=torch.float32)
+            for group_key, indices in groups.items():
+                group_n = len(indices)
+                if group_n < 2:
+                    # Single sample group — advantage stays 0 (no relative ordering)
+                    for idx in indices:
+                        result[idx] = 0.0
+                    continue
+                # Extract group advantages
+                group_vals = advantages_t[indices]
+                # Sort and assign fractional ranks within group
+                sorted_indices_local = torch.argsort(group_vals)
+                ranks_local = torch.zeros(group_n, dtype=torch.float32, device=advantages_t.device)
+                ranks_local[sorted_indices_local] = torch.arange(group_n, dtype=torch.float32, device=advantages_t.device)
+                # Normalize ranks to [-1, 1] centered at 0
+                normalized_ranks = (ranks_local - (group_n - 1) / 2.0) / ((group_n - 1) / 2.0 + 1e-8)
+                # Scale by rank_scale
+                for i, idx in enumerate(indices):
+                    result[idx] = normalized_ranks[i] * rank_scale
+
+            advantages_t = result
 
             logger.warning(
                 f"[VarProtect] step={step}: rank-based advantages "
-                f"(n={n}, rank_scale={rank_scale}, "
+                f"(n={n}, groups={len(groups)}, rank_scale={rank_scale}, "
                 f"adv_mean={advantages_t.mean().item():.4f}, "
                 f"adv_std={advantages_t.std().item():.4f})"
             )
@@ -357,7 +383,7 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
             )
 
         advantages_t = torch.tensor(advantages_list).to(self.device)
-        advantages_t = self._normalize_advantages(advantages_t, current_step)
+        advantages_t = self._normalize_advantages(advantages_t, current_step, payloads_list)
         component_advantages_t = self._build_component_advantages(
             payloads_list,
             processed_samples,

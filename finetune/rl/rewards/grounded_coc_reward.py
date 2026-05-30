@@ -167,7 +167,7 @@ def extract_gt_decision(
     # Lateral movement
     lateral_delta = (xyz[-1, 1] - xyz[0, 1]).item()
 
-    # Heading change (if rotation available)
+    # Heading change (if rotation available, otherwise fallback to position delta)
     heading_change = 0.0
     if gt_future_rot is not None:
         rot = gt_future_rot
@@ -176,6 +176,12 @@ def extract_gt_decision(
         if rot.shape[0] >= 2:
             heading = torch.atan2(rot[..., 1, 0], rot[..., 0, 0])
             heading_change = (heading[-1] - heading[0]).item()
+    else:
+        # Fallback: compute heading change from position deltas using atan2
+        if dxy.shape[0] >= 2:
+            heading_start = torch.atan2(dxy[0, 1], dxy[0, 0]).item()
+            heading_end = torch.atan2(dxy[-1, 1], dxy[-1, 0]).item()
+            heading_change = heading_end - heading_start
 
     # Classify decisions
     decisions: dict[str, float] = {}
@@ -230,12 +236,13 @@ def extract_gt_decision(
             decisions["accelerate"] = 0.0
 
     # Nudge left/right: lateral movement
-    if lateral_delta < -0.8:  # Negative y = left in typical ego frame
+    # PAI ego frame: Y-positive = LEFT (standard right-hand system: X-forward, Y-left, Z-up)
+    if lateral_delta > 0.8:  # Positive y = left in PAI ego frame
         decisions["nudge_left"] = min(1.0, abs(lateral_delta) / 3.0)
     else:
         decisions["nudge_left"] = 0.0
 
-    if lateral_delta > 0.8:
+    if lateral_delta < -0.8:  # Negative y = right in PAI ego frame
         decisions["nudge_right"] = min(1.0, abs(lateral_delta) / 3.0)
     else:
         decisions["nudge_right"] = 0.0

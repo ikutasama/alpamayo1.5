@@ -269,12 +269,14 @@ def compute_hcc_v2_reward(
     # If scene has vehicles/pedestrians but CoC doesn't mention them,
     # mildly penalize to encourage obstacle awareness (gentle, not dominating)
     anti_conservative_penalty = 0.0
-    has_real_obstacles = scene_facts.get("num_obstacles", 0) > 5
+    # Use consistent threshold: at least 1 obstacle for anti-conservative check
+    # (was >5 which made penalty almost never fire)
+    has_real_obstacles_for_penalty = scene_facts.get("num_obstacles", 0) > 1
     has_vehicle = scene_facts.get("has_vehicle_nearby", False)
     has_pedestrian = scene_facts.get("has_pedestrian_nearby", False)
     object_recall = grounded_metrics.get("object_recall", 0.0)
     
-    if has_real_obstacles and (has_vehicle or has_pedestrian):
+    if has_real_obstacles_for_penalty and (has_vehicle or has_pedestrian):
         # Scene has obstacles, check if CoC mentions them
         if object_recall < 0.3:
             # CoC barely mentions obstacles → small penalty
@@ -299,13 +301,16 @@ def compute_hcc_v2_reward(
         comfort_score = 0.0
     comfort_norm = comfort_score - 1.0
 
-    # Continuous trajectory reward
+    # Continuous trajectory reward (range [0,1] from exp(-l2/2))
     s4_traj = float(math.exp(-l2_dist / 2.0))
     tw = w.get("traj_l2_weight", 0.4)
     cw = w.get("comfort_weight", 0.1)
     tw_cw = tw + cw
-    s4_combined = (tw * s4_traj + cw * max(0, comfort_norm)) / tw_cw if tw_cw > 0 else s4_traj
-    s4_combined = max(0.0, s4_combined)
+    # Combine traj and comfort: comfort_norm ∈ [-1, 0] (always ≤0 since comfort_score ∈ [0,1])
+    # Use min(0, comfort_norm) so comfort only penalizes bad driving, never boosts
+    s4_combined = (tw * s4_traj + cw * min(0.0, comfort_norm)) / tw_cw if tw_cw > 0 else s4_traj
+    # Normalize s4 to [-1, 1] like the other layers so traj can give NEGATIVE signal
+    s4_norm = 2.0 * s4_combined - 1.0
 
     # ============================================================
     # Aggregate: Weighted additive formula
@@ -315,7 +320,7 @@ def compute_hcc_v2_reward(
     raa_w = w["raa_weight"]  # Now used for decision alignment
     traj_w = max(0.0, 1.0 - scene_w - coc_w - raa_w)
 
-    # Normalize scene/decision/coc to [-1, 1] range
+    # All layers normalized to [-1, 1] range for symmetric gradient signal
     s1_norm = 2.0 * s1_scene - 1.0
     s2_norm = 2.0 * s2_decision - 1.0
     s3_norm = 2.0 * s3_coc - 1.0
@@ -324,7 +329,7 @@ def compute_hcc_v2_reward(
         scene_w * s1_norm
         + coc_w * s3_norm         # CoC quality (anti-template)
         + raa_w * s2_norm         # Decision alignment (replaces old RAA)
-        + traj_w * s4_combined    # Trajectory quality
+        + traj_w * s4_norm        # Trajectory quality (now symmetric [-1,1])
     )
 
     # Format bonus/penalty
