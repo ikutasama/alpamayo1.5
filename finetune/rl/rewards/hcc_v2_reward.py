@@ -303,14 +303,20 @@ def compute_hcc_v2_reward(
 
     # Continuous trajectory reward (range [0,1] from exp(-l2/2))
     s4_traj = float(math.exp(-l2_dist / 2.0))
-    tw = w.get("traj_l2_weight", 0.4)
-    cw = w.get("comfort_weight", 0.1)
-    tw_cw = tw + cw
-    # Combine traj and comfort: comfort_norm ∈ [-1, 0] (always ≤0 since comfort_score ∈ [0,1])
-    # Use min(0, comfort_norm) so comfort only penalizes bad driving, never boosts
-    s4_combined = (tw * s4_traj + cw * min(0.0, comfort_norm)) / tw_cw if tw_cw > 0 else s4_traj
-    # Normalize s4 to [-1, 1] like the other layers so traj can give NEGATIVE signal
-    s4_norm = 2.0 * s4_combined - 1.0
+
+    # Comfort is handled SEPARATELY as a penalty (not mixed into traj normalization)
+    # comfort_score ∈ [0,1] → comfort_norm ∈ [-1,0]
+    # We convert it to a penalty in [-1, 0] that subtracts from final reward
+    comfort_penalty_weight = w.get("comfort_weight", 0.1)
+    comfort_norm = comfort_score - 1.0  # ∈ [-1, 0]
+    # min(0, comfort_norm) ensures comfort only penalizes (never boosts)
+    # Result ∈ [-1, 0]: bad comfort → -1, perfect comfort → 0
+    comfort_contribution = comfort_penalty_weight * min(0.0, comfort_norm)
+
+    # Normalize traj to [-1, 1] like other layers: s4_traj ∈ [0,1] → s4_norm ∈ [-1,1]
+    # Bad trajectory (large l2) → s4_traj≈0 → s4_norm≈-1 (strong negative signal)
+    # Good trajectory (small l2) → s4_traj≈1 → s4_norm≈+1
+    s4_norm = 2.0 * s4_traj - 1.0
 
     # ============================================================
     # Aggregate: Weighted additive formula
@@ -339,6 +345,9 @@ def compute_hcc_v2_reward(
     # Apply anti-conservative penalty
     final_reward += anti_conservative_penalty
     
+    # Apply comfort penalty (separate from traj, only penalizes bad comfort)
+    final_reward += comfort_contribution
+    
     # Hard penalty for extremely long CoC (>80 words)
     # Apply hard penalty for excessive length (>50 words)
     length_hard_penalty = 0.0
@@ -359,7 +368,7 @@ def compute_hcc_v2_reward(
     print(f"[HCC-v2] Layers: scene={s1_scene:.3f}(w={scene_w:.2f}) "
           f"decision={s2_decision:.3f}(w={raa_w:.2f}) "
           f"coc_q={s3_coc:.3f}(w={coc_w:.2f}) "
-          f"traj={s4_combined:.3f}(w={traj_w:.2f}) "
+          f"traj={s4_norm:.3f}(w={traj_w:.2f}) "
           f"l2={l2_dist:.2f} spec={specificity_bonus:.2f}{penalty_str} → R={final_reward:.4f}", flush=True)
 
     # ============================================================
@@ -370,7 +379,8 @@ def compute_hcc_v2_reward(
         "scene_understanding": float(s1_scene),
         "decision_alignment": float(s2_decision),
         "coc_quality": float(s3_coc),
-        "traj_quality": float(s4_combined),
+        "traj_quality": float(s4_traj),
+        "traj_quality_norm": float(s4_norm),
         # Format
         "format_score": float(format_score),
         "cot_word_count": float(word_count),
@@ -399,16 +409,13 @@ def compute_hcc_v2_reward(
         if key in grounded_metrics:
             reward_dict[key] = float(grounded_metrics[key])
 
-    # Log
-    try:
-        logger.info(
-            f"[HCC-v2] scene={s1_scene:.3f} decision={s2_decision:.3f} "
-            f"coc_q={s3_coc:.3f} traj={s4_combined:.3f} "
-            f"l2={l2_dist:.2f} fmt={format_score:.2f} "
-            f"words={word_count} unique={unique_ratio:.2f} "
-            f"R={final_reward:.4f}"
-        )
-    except Exception:
-        pass
+# Log
+    logger.warning(
+        f"[HCC-v2] scene={s1_scene:.3f} decision={s2_decision:.3f} "
+        f"coc_q={s3_coc:.3f} traj={s4_norm:.3f} "
+        f"l2={l2_dist:.2f} fmt={format_score:.2f} "
+        f"words={word_count} unique={unique_ratio:.2f} "
+        f"R={final_reward:.4f}"
+    )
 
     return final_reward, reward_dict

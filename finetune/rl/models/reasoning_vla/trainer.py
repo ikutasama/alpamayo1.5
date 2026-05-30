@@ -246,11 +246,13 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                         f"(raw_std={raw_std:.6f} < min_std={min_std})"
                     )
 
-            skip_std = vp_cfg.get("skip_update_std", 0.005)
-            if raw_std < skip_std:
+            # Check post-amplification variance, not pre-amplification raw_std
+            post_amp_std = advantages_t.std().item()
+            skip_std2 = vp_cfg.get("skip_update_std", 0.005)
+            if post_amp_std < skip_std2:
                 logger.warning(
-                    f"[VarProtect] step={step}: reward variance too low "
-                    f"(std={raw_std:.6f} < skip_std={skip_std}), zeroing advantages"
+                    f"[VarProtect] step={step}: post-amp variance too low "
+                    f"(post-amp std={post_amp_std:.6f} < {skip_std2:.6f}), zeroing"
                 )
                 advantages_t = torch.zeros_like(advantages_t)
 

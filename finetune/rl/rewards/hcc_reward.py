@@ -487,15 +487,10 @@ def compute_hcc_reward(
     s4_traj = float(__import__('math').exp(-l2_dist / 2.0))
     s4_comfort = comfort_score_norm
 
-    tw = w.get("traj_l2_weight", 0.5)
-    cw = w.get("comfort_weight", 0.1)
-    tw_cw_sum = tw + cw
-    if tw_cw_sum > 0:
-        s4_combined = (tw * s4_traj + cw * s4_comfort) / tw_cw_sum
-    else:
-        s4_combined = s4_traj
-
-    s4_combined = max(0.0, s4_combined)
+    # Normalize traj to [-1, 1] (same fix as v2)
+    s4_norm = 2.0 * s4_traj - 1.0  # maps [0,1] -> [-1,1]
+    # Comfort: independent penalty (only penalizes bad comfort, never boosts)
+    comfort_contribution = 0.1 * min(0.0, comfort_score - 1.0)
 
     # Additive reward formula: all layers contribute directly
     coc_w = w["coc_quality_weight"]
@@ -508,9 +503,10 @@ def compute_hcc_reward(
         scene_w * (2.0 * s1_scene - 1.0)
         + coc_w * s2_coc_normalized
         + raa_w * s3_raa_normalized
-        + traj_layer_w * s4_combined
+        + traj_layer_w * s4_norm
         + format_w * (2.0 * format_score - 1.0)
         + consistency_penalty
+        + comfort_contribution
     )
 
     if not (isinstance(final_reward, (int, float)) and math.isfinite(final_reward)):
@@ -521,8 +517,8 @@ def compute_hcc_reward(
 
     logger.warning(
         f"[HCC-RM] s1(scene)={s1_scene:.3f} s2(coc)={s2_coc_normalized:.3f} "
-        f"s3(raa)={s3_raa_normalized:.3f} s4(traj)={s4_combined:.3f} "
-        f"s4_l2={l2_dist:.3f} s4_comf={comfort_score:.3f} "
+        f"s3(raa)={s3_raa_normalized:.3f} s4(traj)={s4_norm:.3f} "
+        f"s4_l2={l2_dist:.3f} s4_comf={comfort_score:.3f} comfort_contribution={comfort_contribution:.3f} "
         f"facts={grounded_fact_score:.3f} fmt={format_score:.3f} "
         f"cons_pen={consistency_penalty:.3f} "
         f"R_final={final_reward:.4f}"
@@ -540,6 +536,8 @@ def compute_hcc_reward(
         "raa_score": float(s3_raa),
         "traj_L2": float(l2_dist),
         "comfort_reward": float(comfort_score),
+        "traj_quality_norm": float(s4_norm),
+        "comfort_contribution": float(comfort_contribution),
         "reward": float(final_reward),
         "consistency_penalty": float(consistency_penalty),
         **grounded_info,

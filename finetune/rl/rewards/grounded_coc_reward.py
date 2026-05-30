@@ -186,11 +186,11 @@ def extract_gt_decision(
     # Classify decisions
     decisions: dict[str, float] = {}
 
-    # Stop: very low final speed
-    if speed_end < 0.3 and speed_start > 0.5:
-        decisions["stop"] = 0.9
-    elif speed_end < 0.15:
+    # Stop: check near-zero speed first (highest confidence)
+    if speed_end < 0.15:
         decisions["stop"] = 1.0
+    elif speed_end < 0.3 and speed_start > 0.5:
+        decisions["stop"] = 0.9
     else:
         decisions["stop"] = 0.0
 

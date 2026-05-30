@@ -440,8 +440,12 @@ def compute_coc_reward(
     reasoning_l = reasoning.lower()
 
     length_score = min(1.0, len(reasoning.strip()) / max(1, min_chars))
-    risk_score = float(any(w in reasoning_l for w in _LIGHTWEIGHT_RISK_WORDS))
-    action_score = float(any(w in reasoning_l for w in _LIGHTWEIGHT_ACTION_WORDS))
+    # Use regex word boundary matching to avoid false positives
+    # (e.g. "light" matching "lightly", "stop" matching "stopped")
+    risk_pattern = re.compile(r'|'.join(r'\b' + re.escape(w) + r'\b' for w in _LIGHTWEIGHT_RISK_WORDS))
+    action_pattern = re.compile(r'|'.join(r'\b' + re.escape(w) + r'\b' for w in _LIGHTWEIGHT_ACTION_WORDS))
+    risk_score = float(bool(risk_pattern.search(reasoning_l)))
+    action_score = float(bool(action_pattern.search(reasoning_l)))
     format_score = float(sections["format_score"])
 
     ref_score = 0.0
