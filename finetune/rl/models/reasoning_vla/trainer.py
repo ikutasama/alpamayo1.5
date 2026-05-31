@@ -62,12 +62,13 @@ def _normalize_grouped(
     fallback: list[float],
 ) -> list[float]:
     """Normalize component rewards within each prompt group, with safe fallback."""
-    groups: dict[tuple[str, str], list[int]] = {}
+    groups: dict[int, list[int]] = {}
     for idx, payload in enumerate(payloads):
-        if isinstance(payload, dict):
-            key = (str(payload.get("split", "")), str(payload.get("idx", idx)))
-        else:
-            key = ("", str(idx))
+        # Group by Python object identity — same prompt dict object means
+        # same prompt with n_generation completions. id() works because
+        # vLLM rollout returns the same dict reference for all completions
+        # of a given prompt.
+        key = id(payload) if isinstance(payload, dict) else idx
         groups.setdefault(key, []).append(idx)
 
     out = list(fallback)
@@ -181,18 +182,17 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
             n = advantages_t.numel()
 
             # Build prompt groups from payloads (same as _normalize_grouped)
-            groups: dict[tuple[str, str], list[int]] = {}
+            groups: dict[int, list[int]] = {}
             if payloads is not None:
                 for idx, payload in enumerate(payloads):
-                    if isinstance(payload, dict):
-                        key = (str(payload.get("split", "")), str(payload.get("idx", idx)))
-                    else:
-                        key = ("", str(idx))
+                    # Group by Python object identity — same prompt dict object
+                    # means same prompt with n_generation completions.
+                    key = id(payload) if isinstance(payload, dict) else idx
                     groups.setdefault(key, []).append(idx)
 
             # If no group info available, treat all as one group
             if not groups:
-                groups = {("all", "all"): list(range(n))}
+                groups = {0: list(range(n))}
 
             result = torch.zeros_like(advantages_t, dtype=torch.float32)
             for group_key, indices in groups.items():
