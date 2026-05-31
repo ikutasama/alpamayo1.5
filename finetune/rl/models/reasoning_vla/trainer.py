@@ -64,11 +64,20 @@ def _normalize_grouped(
     """Normalize component rewards within each prompt group, with safe fallback."""
     groups: dict[int, list[int]] = {}
     for idx, payload in enumerate(payloads):
-        # Group by Python object identity — same prompt dict object means
-        # same prompt with n_generation completions. id() works because
-        # vLLM rollout returns the same dict reference for all completions
-        # of a given prompt.
-        key = id(payload) if isinstance(payload, dict) else idx
+        # Group by prompt content hash, NOT by object identity.
+        # The framework copies prompt dicts when expanding completions,
+        # so id(payload) gives unique keys per completion.
+        # Same prompt → same prompt_token_ids → same hash.
+        if isinstance(payload, dict) and "prompt_token_ids" in payload:
+            ids = payload["prompt_token_ids"]
+            # Convert to tuple for stable hashing (list is not hashable)
+            try:
+                key = hash(tuple(ids))
+            except TypeError:
+                # If ids contains unhashable items, use len as rough proxy
+                key = len(ids)
+        else:
+            key = idx
         groups.setdefault(key, []).append(idx)
 
     out = list(fallback)
@@ -185,9 +194,17 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
             groups: dict[int, list[int]] = {}
             if payloads is not None:
                 for idx, payload in enumerate(payloads):
-                    # Group by Python object identity — same prompt dict object
-                    # means same prompt with n_generation completions.
-                    key = id(payload) if isinstance(payload, dict) else idx
+                    # Group by prompt content hash, NOT by object identity.
+                    # The framework copies prompt dicts when expanding,
+                    # so id(payload) gives unique keys per completion.
+                    if isinstance(payload, dict) and "prompt_token_ids" in payload:
+                        ids = payload["prompt_token_ids"]
+                        try:
+                            key = hash(tuple(ids))
+                        except TypeError:
+                            key = len(ids)
+                    else:
+                        key = idx
                     groups.setdefault(key, []).append(idx)
 
             # If no group info available, treat all as one group
