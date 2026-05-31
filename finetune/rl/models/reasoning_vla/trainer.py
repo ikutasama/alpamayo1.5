@@ -60,25 +60,18 @@ def _normalize_grouped(
     values: list[float],
     payloads: list[Any],
     fallback: list[float],
+    n_generation: int = 8,
 ) -> list[float]:
-    """Normalize component rewards within each prompt group, with safe fallback."""
+    """Normalize component rewards within each prompt group, with safe fallback.
+
+    Groups are formed by position: completions 0..n_generation-1 belong to
+    prompt 0, n_generation..2*n_generation-1 belong to prompt 1, etc.
+    This is robust because cosmos-rl always expands completions in order.
+    """
     groups: dict[int, list[int]] = {}
-    for idx, payload in enumerate(payloads):
-        # Group by prompt content hash, NOT by object identity.
-        # The framework copies prompt dicts when expanding completions,
-        # so id(payload) gives unique keys per completion.
-        # Same prompt → same prompt_token_ids → same hash.
-        if isinstance(payload, dict) and "prompt_token_ids" in payload:
-            ids = payload["prompt_token_ids"]
-            # Convert to tuple for stable hashing (list is not hashable)
-            try:
-                key = hash(tuple(ids))
-            except TypeError:
-                # If ids contains unhashable items, use len as rough proxy
-                key = len(ids)
-        else:
-            key = idx
-        groups.setdefault(key, []).append(idx)
+    for idx in range(len(values)):
+        group_key = idx // n_generation
+        groups.setdefault(group_key, []).append(idx)
 
     out = list(fallback)
     eps = 1e-6
@@ -190,26 +183,15 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
             rank_scale = vp_cfg.get("rank_scale", 1.0)
             n = advantages_t.numel()
 
-            # Build prompt groups from payloads (same as _normalize_grouped)
+            # Build prompt groups by position (most robust method).
+            # cosmos-rl expands completions in order:
+            # prompt0: completions[0..n_gen-1], prompt1: completions[n_gen..2*n_gen-1], ...
+            n_gen = getattr(self.config.rollout, 'n_generation', 8) \
+                if hasattr(self, 'config') else 8
             groups: dict[int, list[int]] = {}
-            if payloads is not None:
-                for idx, payload in enumerate(payloads):
-                    # Group by prompt content hash, NOT by object identity.
-                    # The framework copies prompt dicts when expanding,
-                    # so id(payload) gives unique keys per completion.
-                    if isinstance(payload, dict) and "prompt_token_ids" in payload:
-                        ids = payload["prompt_token_ids"]
-                        try:
-                            key = hash(tuple(ids))
-                        except TypeError:
-                            key = len(ids)
-                    else:
-                        key = idx
-                    groups.setdefault(key, []).append(idx)
-
-            # If no group info available, treat all as one group
-            if not groups:
-                groups = {0: list(range(n))}
+            for idx in range(n):
+                group_key = idx // n_gen
+                groups.setdefault(group_key, []).append(idx)
 
             result = torch.zeros_like(advantages_t, dtype=torch.float32)
             for group_key, indices in groups.items():
@@ -720,6 +702,7 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
 
         components = [s["reward_components"] for s in processed_samples]
         fallback = [float(v) for v in fallback_advantages]
+        n_gen = getattr(self.config.rollout, 'n_generation', 8)
 
         def value(name: str, default: float = 0.0) -> list[float]:
             return [float(c.get(name, default)) for c in components]
@@ -745,9 +728,9 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         format_values = value_any(("coc_format_score", "coc_factual", "scene_understanding"))
 
         adv = {
-            "coc": _normalize_grouped(coc_values, payloads, fallback),
-            "traj": _normalize_grouped(traj_values, payloads, fallback),
-            "format": _normalize_grouped(format_values, payloads, fallback),
+            "coc": _normalize_grouped(coc_values, payloads, fallback, n_generation=n_gen),
+            "traj": _normalize_grouped(traj_values, payloads, fallback, n_generation=n_gen),
+            "format": _normalize_grouped(format_values, payloads, fallback, n_generation=n_gen),
         }
         return {
             key: torch.tensor(vals, device=self.device, dtype=torch.float32)
