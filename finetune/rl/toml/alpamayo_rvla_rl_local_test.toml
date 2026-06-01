@@ -222,6 +222,16 @@ contrastive_temperature = 0.07
 # Per-dimension objective weights [coc, raa, traj, comfort]
 objective_weights = [0.25, 0.25, 0.25, 0.25]
 
+# ---- Diffusion Expert RL Training ----
+# VLM advantage propagates through detached KV cache to expert gradients.
+# Gradient path: advantage*MSE -> action_out_proj -> expert transformer -> KV cache (DETACHED) -> no VLM grad
+[custom.alpamayo.diffusion_rl]
+enable = true
+loss_weight = 0.1
+advantage_mode = "weighted_regression"
+advantage_clip = 2.0
+min_advantage_threshold = -1.0
+
 [custom.alpamayo.prefetch]
 
 # Prefetch cache size; <= 0 disables node-prefetch (legacy synchronous dataset fetch path). please set this to be train_batch_per_replica * replica per node.
