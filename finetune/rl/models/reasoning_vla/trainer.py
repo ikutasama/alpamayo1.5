@@ -193,6 +193,14 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                 group_key = idx // n_gen
                 groups.setdefault(group_key, []).append(idx)
 
+            # Debug: log n_gen and group structure (every 50 steps)
+            if step % 50 < 4:
+                group_sizes = [len(v) for v in groups.values()]
+                logger.warning(
+                    f"[VarProtect] step={step}: DEBUG n_gen={n_gen}, n={n}, "
+                    f"num_groups={len(groups)}, group_sizes={group_sizes}"
+                )
+
             result = torch.zeros_like(advantages_t, dtype=torch.float32)
             for group_key, indices in groups.items():
                 group_n = len(indices)
