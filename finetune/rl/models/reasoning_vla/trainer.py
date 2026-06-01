@@ -895,30 +895,23 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                         f"f_xyz={f_xyz.shape if hasattr(f_xyz, 'shape') else type(f_xyz)} "
                         f"f_rot={f_rot.shape if f_rot is not None and hasattr(f_rot, 'shape') else None}"
                     )
-                    # Dataset provides xyz as [1, 1, T, 3] (4D) or [T, 3] (2D)
-                    # and rot as [1, 1, T, 3, 3] (5D, rotation matrix) or [T, 4] (2D, quaternion)
-                    # We squeeze leading dimensions to get core [T, 3] / [T, 3, 3] / [T, 4]
-                    # then stack will add the batch dimension correctly.
-                    if h_xyz.dim() >= 4:
-                        # Squeeze leading B and n_traj_group dims: [1, 1, T, 3] → [T, 3]
-                        h_xyz = h_xyz.squeeze(0).squeeze(0)
-                    if h_rot is not None and h_rot.dim() >= 5:
-                        # Squeeze leading dims: [1, 1, T, 3, 3] → [T, 3, 3]
-                        h_rot = h_rot.squeeze(0).squeeze(0)
-                    elif h_rot is not None and h_rot.dim() == 4:
-                        # [1, T, 3, 3] → [T, 3, 3]
+                    # Dataset tensors may arrive with varying leading dimensions
+                    # depending on the prefetch pipeline:
+                    #   - Raw dataset: [1, 1, T, 3] (4D) for xyz, [1, 1, T, 3, 3] (5D) for rot
+                    #   - After prefetch squeeze: [1, T, 3] (3D) for xyz, [1, T, 3, 3] (4D) for rot
+                    #   - Fully squeezed: [T, 3] (2D) for xyz, [T, 3, 3] (3D) or [T, 4] for rot
+                    # We need to reduce to [T, 3] / [T, 3, 3] before stacking.
+                    # Strategy: repeatedly squeeze dim 0 until it's no longer size 1,
+                    #   then check if remaining shape matches expected [T, dim] pattern.
+                    while h_xyz.dim() > 2 and h_xyz.shape[0] == 1:
+                        h_xyz = h_xyz.squeeze(0)
+                    while h_rot is not None and h_rot.dim() > 3 and h_rot.shape[0] == 1:
                         h_rot = h_rot.squeeze(0)
-                    elif h_rot is not None and h_rot.dim() == 3:
-                        # Could be [T, 3, 3] (rotation matrix) or [T, 4] (quaternion)
-                        # Keep as is — traj_to_action handles both
-                        pass
-                    if f_xyz.dim() >= 4:
-                        f_xyz = f_xyz.squeeze(0).squeeze(0)
-                    if f_rot is not None and f_rot.dim() >= 5:
-                        f_rot = f_rot.squeeze(0).squeeze(0)
-                    elif f_rot is not None and f_rot.dim() == 4:
+                    while f_xyz.dim() > 2 and f_xyz.shape[0] == 1:
+                        f_xyz = f_xyz.squeeze(0)
+                    while f_rot is not None and f_rot.dim() > 3 and f_rot.shape[0] == 1:
                         f_rot = f_rot.squeeze(0)
-                    elif f_rot is None:
+                    if f_rot is None:
                         # ego_future_rot missing: create unit rotation matrix [T, 3, 3]
                         T_steps = f_xyz.shape[0] if f_xyz.dim() == 2 else 1
                         f_rot = torch.zeros(T_steps, 3, 3,
@@ -926,9 +919,6 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                         f_rot[:, 0, 0] = 1.0  # Identity rotation matrix
                         f_rot[:, 1, 1] = 1.0
                         f_rot[:, 2, 2] = 1.0
-                    elif f_rot.dim() == 3:
-                        # [T, 3, 3] or [T, 4] — keep as is
-                        pass
 
                     ego_history_xyz_list.append(h_xyz)
                     ego_history_rot_list.append(h_rot)
