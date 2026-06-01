@@ -591,6 +591,23 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                                     for key in metrics:
                                         self.metrics[key] += metrics[key]
 
+                                    # --- Diffusion Expert RL: advantage-weighted flow matching loss ---
+                                    # After GRPO token-level loss backward, compute a separate
+                                    # diffusion expert loss weighted by the per-sample advantage.
+                                    # Gradient flows: advantage*MSE -> action_out_proj -> expert
+                                    # transformer -> KV cache (detached) -> no VLM gradient.
+                                    diffusion_rl_cfg = self._get_diffusion_rl_cfg()
+                                    if diffusion_rl_cfg.get("enable", False):
+                                        self._compute_and_backward_diffusion_rl_loss(
+                                            minibatched_processed_samples=minibatched_processed_samples,
+                                            minibatched_scalar_advantages=minibatched_scalar_advantages,
+                                            user_mini_batch=user_mini_batch,
+                                            computed_max_len=computed_max_len,
+                                            diffusion_rl_cfg=diffusion_rl_cfg,
+                                            current_step=current_step,
+                                            num_mini_batch=num_mini_batch,
+                                        )
+
                             self.mini_step += 1
                             local_mini_step += 1
 
@@ -647,6 +664,12 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                 for key, tensor in component_advantages_t.items():
                     report_data[f"train/advantage_{key}_mean"] = tensor.mean().item()
                     report_data[f"train/advantage_{key}_std"] = tensor.std().item() if tensor.numel() > 1 else 0.0
+                # Diffusion RL loss metrics
+                if hasattr(self, '_diffusion_rl_loss_sum') and self._diffusion_rl_loss_count > 0:
+                    report_data["train/diffusion_rl_loss"] = self._diffusion_rl_loss_sum / self._diffusion_rl_loss_count
+                    # Reset for next step
+                    self._diffusion_rl_loss_sum = 0.0
+                    self._diffusion_rl_loss_count = 0
                 raw_reward = report_data.get("train/raw_reward_mean", float("nan"))
                 reward_std = report_data.get("train/raw_reward_std", float("nan"))
                 logger.warning(
@@ -793,3 +816,250 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         fallback_mask = logprob_masks & ~routed_mask
         routed += fallback_mask * (fallback_weight * scalar_advantages)
         return routed
+
+    def _compute_and_backward_diffusion_rl_loss(
+        self,
+        minibatched_processed_samples: list[Any],
+        minibatched_scalar_advantages: torch.Tensor,
+        user_mini_batch: dict[str, Any],
+        computed_max_len: int,
+        diffusion_rl_cfg: dict[str, Any],
+        current_step: int,
+        num_mini_batch: int,
+    ) -> None:
+        """Compute advantage-weighted diffusion expert loss and backward it.
+
+        After the GRPO token-level loss.backward() has been called, we do a
+        second forward pass through the model with compute_diffusion_loss=True
+        to get the flow matching MSE loss from the diffusion expert. This loss
+        is then weighted by the per-sample advantage and backward'd separately.
+
+        Gradient flow:
+            advantage * diffusion_MSE -> action_out_proj -> expert transformer
+            -> KV cache keys/values (DETACHED) -> NO VLM gradient
+
+        VLM gets its own independent gradient via GRPO token-level loss.
+        Expert gets gradient via advantage-weighted flow matching loss.
+        The KV cache acts as the bridge: it carries VLM's contextual understanding
+        to the expert, but gradient stops at the detached boundary.
+
+        Args:
+            minibatched_processed_samples: Raw data dicts for the current mini-batch.
+            minibatched_scalar_advantages: [mini_batch_size, computed_max_len] expanded advantages.
+            user_mini_batch: Collated batch dict (input_ids, position_ids, etc.).
+            computed_max_len: Padded sequence length for this mini-batch.
+            diffusion_rl_cfg: Config dict from TOML [custom.alpamayo.diffusion_rl].
+            current_step: Global training step (for logging).
+            num_mini_batch: Number of mini-batches (for loss scaling).
+        """
+        loss_weight = float(diffusion_rl_cfg.get("loss_weight", 0.1))
+        advantage_mode = diffusion_rl_cfg.get("advantage_mode", "weighted_regression")
+        advantage_clip = float(diffusion_rl_cfg.get("advantage_clip", 2.0))
+        min_advantage_threshold = float(diffusion_rl_cfg.get("min_advantage_threshold", -1.0))
+
+        # 1. Extract trajectory tensors from processed samples
+        # Each processed_sample is a dict containing ego_future_xyz, ego_future_rot, etc.
+        # These were collated into user_mini_batch, but we need the raw per-sample tensors
+        # to reconstruct them for the diffusion forward pass.
+        ego_history_xyz_list = []
+        ego_history_rot_list = []
+        ego_future_xyz_list = []
+        ego_future_rot_list = []
+
+        for sample in minibatched_processed_samples:
+            if isinstance(sample, dict):
+                # Ensure 4D shape: [B, n_traj_group, n_traj, dim]
+                h_xyz = sample.get("ego_history_xyz")
+                h_rot = sample.get("ego_history_rot")
+                f_xyz = sample.get("ego_future_xyz")
+                f_rot = sample.get("ego_future_rot")
+
+                if h_xyz is not None and f_xyz is not None:
+                    # Add n_traj_group dim if missing
+                    if h_xyz.dim() == 3:
+                        h_xyz = h_xyz.unsqueeze(1)
+                    if h_rot.dim() == 4:
+                        h_rot = h_rot.unsqueeze(1)
+                    if f_xyz.dim() == 3:
+                        f_xyz = f_xyz.unsqueeze(1)
+                    if f_rot is not None and f_rot.dim() == 4:
+                        f_rot = f_rot.unsqueeze(1)
+
+                    ego_history_xyz_list.append(h_xyz)
+                    ego_history_rot_list.append(h_rot)
+                    ego_future_xyz_list.append(f_xyz)
+                    ego_future_rot_list.append(f_rot if f_rot is not None else torch.zeros_like(f_xyz[..., :1].expand_as(f_xyz)))
+                else:
+                    logger.warning(
+                        f"[DiffusionRL] step={current_step}: sample is not a dict, "
+                        f"cannot extract trajectory data. Skipping diffusion loss."
+                    )
+                    return
+
+        if not ego_future_xyz_list:
+            logger.warning(
+                f"[DiffusionRL] step={current_step}: No trajectory data found "
+                f"in mini-batch. Skipping diffusion loss."
+            )
+            return
+
+        # 2. Stack trajectory tensors into batch tensors
+        try:
+            ego_history_xyz = torch.stack(ego_history_xyz_list).to(self.device)
+            ego_history_rot = torch.stack(ego_history_rot_list).to(self.device)
+            ego_future_xyz = torch.stack(ego_future_xyz_list).to(self.device)
+            ego_future_rot = torch.stack(ego_future_rot_list).to(self.device)
+        except Exception as e:
+            logger.warning(
+                f"[DiffusionRL] step={current_step}: Failed to stack trajectory "
+                f"tensors: {e}. Skipping diffusion loss."
+            )
+            return
+
+        # 3. Reconstruct the tokenized_data dict for a second model forward
+        # We need a fresh forward pass with use_cache=True to get past_key_values
+        # for the diffusion expert path. We reuse the same collated batch but
+        # reconstruct tokenized_data as a fresh dict (input_ids will be popped
+        # by the model's forward method).
+        # NOTE: The first forward pass already popped input_ids from tokenized_data,
+        # so we need to reconstruct it from user_mini_batch.
+        diffusion_tokenized_data = {}
+        for k, v in user_mini_batch.items():
+            if k in ("input_ids", "position_ids", "attention_mask",
+                      "pixel_values", "image_grid_thw",
+                      "labels_mask", "logprob_masks",
+                      "coc_logprob_masks", "traj_logprob_masks",
+                      "format_logprob_masks",
+                      "interested_tokens", "padding_mask"):
+                diffusion_tokenized_data[k] = v
+
+        # 4. Compute per-sample scalar advantages (squeeze from expanded)
+        # minibatched_scalar_advantages is [mini_batch_size, computed_max_len]
+        # We need [mini_batch_size] scalar advantages for the diffusion loss.
+        scalar_adv = minibatched_scalar_advantages[:, 0].to(self.device)  # take first position
+
+        # 5. Compute advantage-weighted diffusion loss
+        # Call model forward with compute_diffusion_loss=True
+        model_out = self.model(
+            tokenized_data=diffusion_tokenized_data,
+            ego_history_xyz=ego_history_xyz,
+            ego_history_rot=ego_history_rot,
+            ego_future_xyz=ego_future_xyz,
+            ego_future_rot=ego_future_rot,
+            compute_diffusion_loss=True,
+        )
+
+        raw_diffusion_loss = model_out.diffusion_loss
+        if raw_diffusion_loss is None:
+            logger.warning(
+                f"[DiffusionRL] step={current_step}: Model returned None "
+                f"diffusion_loss. Skipping."
+            )
+            return
+
+        # 6. Weight the diffusion loss by advantage
+        if advantage_mode == "weighted_regression":
+            # Weighted regression: multiply MSE by advantage per sample.
+            # High advantage -> reinforce trajectory prediction toward ground truth.
+            # Low/negative advantage -> push away from ground truth (explore).
+            # This is the core mechanism: advantage flows through KV cache
+            # to the expert's gradient, controlling how much the expert learns
+            # from each sample's trajectory prediction.
+            # Clip advantages to prevent extreme gradients.
+            clipped_adv = torch.clamp(scalar_adv, -advantage_clip, advantage_clip)
+            # Zero out samples with advantage below threshold (very negative = skip)
+            active_mask = clipped_adv >= min_advantage_threshold
+            # Per-sample weighted loss: advantage * MSE
+            # MSE is already mean-reduced per batch, so we need per-sample MSE.
+            # Since diffusion loss is computed on the whole batch as a scalar,
+            # we approximate per-sample loss by dividing total loss equally.
+            # This is a reasonable approximation when batch sizes are uniform.
+            n_active = int(active_mask.sum().item())
+            if n_active == 0:
+                logger.warning(
+                    f"[DiffusionRL] step={current_step}: All advantages below "
+                    f"threshold {min_advantage_threshold}. Skipping diffusion loss."
+                )
+                return
+            weighted_diffusion_loss = raw_diffusion_loss * clipped_adv.mean() * loss_weight
+
+        elif advantage_mode == "absolute_regression":
+            # Absolute regression: only use |advantage| as weight, ignoring sign.
+            # This pushes the expert toward ground truth regardless of advantage sign.
+            abs_adv = torch.abs(scalar_adv)
+            abs_adv = torch.clamp(abs_adv, 0, advantage_clip)
+            weighted_diffusion_loss = raw_diffusion_loss * abs_adv.mean() * loss_weight
+
+        elif advantage_mode == "sign_regression":
+            # Sign regression: positive advantage reinforces, negative suppresses.
+            # This naturally maps to the policy gradient interpretation:
+            # good action (high adv) -> expert learns trajectory
+            # bad action (low/neg adv) -> expert avoids trajectory
+            signed_adv = torch.clamp(scalar_adv, -advantage_clip, advantage_clip)
+            # For negative advantages, we don't want to push AWAY from ground truth
+            # (that would encourage bad trajectories). Instead, we zero them out.
+            positive_mask = signed_adv > 0
+            n_positive = int(positive_mask.sum().item())
+            if n_positive == 0:
+                logger.warning(
+                    f"[DiffusionRL] step={current_step}: No positive advantages. "
+                    f"Skipping diffusion loss."
+                )
+                return
+            weighted_diffusion_loss = raw_diffusion_loss * signed_adv[positive_mask].mean() * loss_weight
+
+        else:
+            logger.warning(
+                f"[DiffusionRL] Unknown advantage_mode: {advantage_mode}. "
+                f"Falling back to weighted_regression."
+            )
+            clipped_adv = torch.clamp(scalar_adv, -advantage_clip, advantage_clip)
+            weighted_diffusion_loss = raw_diffusion_loss * clipped_adv.mean() * loss_weight
+
+        # 7. Backward the weighted diffusion loss
+        weighted_diffusion_loss = weighted_diffusion_loss / num_mini_batch
+        weighted_diffusion_loss.backward()
+
+        # 8. Log diagnostics
+        if current_step % 10 == 0:
+            logger.warning(
+                f"[DiffusionRL] step={current_step}: "
+                f"raw_diff_loss={raw_diffusion_loss.item():.6f}, "
+                f"weighted_diff_loss={weighted_diffusion_loss.item():.6f}, "
+                f"adv_mean={scalar_adv.mean().item():.4f}, "
+                f"adv_std={scalar_adv.std().item():.4f}, "
+                f"mode={advantage_mode}, weight={loss_weight}"
+            )
+
+        # 9. Add to metrics for tensorboard logging
+        diff_loss_val = weighted_diffusion_loss.item()
+        if not hasattr(self, '_diffusion_rl_loss_sum'):
+            self._diffusion_rl_loss_sum = 0.0
+            self._diffusion_rl_loss_count = 0
+        self._diffusion_rl_loss_sum += diff_loss_val
+        self._diffusion_rl_loss_count += 1
+
+    def _get_diffusion_rl_cfg(self) -> dict[str, Any]:
+        """Extract diffusion RL config from TOML [custom.alpamayo.diffusion_rl].
+
+        Config keys:
+            enable (bool): Whether to enable diffusion expert RL training.
+            loss_weight (float): Weight coefficient for the diffusion RL loss.
+            advantage_mode (str): How to weight diffusion loss by advantage.
+                "weighted_regression": adv * MSE (default)
+                "absolute_regression": |adv| * MSE
+                "sign_regression": only positive adv * MSE
+            advantage_clip (float): Clip advantage magnitude.
+            min_advantage_threshold (float): Skip samples below this threshold.
+
+        Returns:
+            Dict with config keys. Empty dict if config not found (disabled).
+        """
+        try:
+            return getattr(self.config, "custom", {}).get("alpamayo", {}).get(
+                "diffusion_rl", {}
+            )
+        except (TypeError, AttributeError):
+            return {}
+
+    

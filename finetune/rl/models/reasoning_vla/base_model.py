@@ -43,6 +43,7 @@ class ReasoningVLAOutput(ModelOutput):
 
     loss: torch.FloatTensor | None = None
     logits: torch.FloatTensor | None = None
+    diffusion_loss: torch.FloatTensor | None = None
 
 
 class RLWrapperReasoningVLA(ReasoningVLA):
@@ -142,6 +143,122 @@ class RLWrapperReasoningVLA(ReasoningVLA):
         )
         return loss
 
+    def _process_traj_future_training(self, traj_data: dict[str, Any]) -> dict[str, Any]:
+        """Process the trajectory future data for diffusion training.
+
+        Converts ego trajectory data to action space and constructs flow matching
+        training data (noisy_x, timesteps, etc.).
+
+        Args:
+            traj_data: Dict with ego_history_xyz/rot and ego_future_xyz/rot tensors.
+
+        Returns:
+            Dict with keys 'x', 'noisy_x', 'timesteps', 'noise', 'is_drop_guidance'
+            suitable for self.diffusion.compute_loss_from_pred.
+        """
+        ego_history_xyz = traj_data["ego_history_xyz"]
+        ego_history_rot = traj_data["ego_history_rot"]
+        ego_future_xyz = traj_data["ego_future_xyz"]
+        ego_future_rot = traj_data["ego_future_rot"]
+        action = self.action_space.traj_to_action(
+            traj_history_xyz=ego_history_xyz,
+            traj_history_rot=ego_history_rot,
+            traj_future_xyz=ego_future_xyz,
+            traj_future_rot=ego_future_rot,
+        )
+        action = action.reshape(-1, *self.action_space.get_action_space_dims())
+        training_data: dict[str, Any] = self.diffusion.construct_training_data(action)
+        return training_data
+
+    def _compute_diffusion_expert_loss(
+        self,
+        vlm_outputs: Any,
+        input_ids: torch.Tensor,
+        traj_data: dict[str, Any],
+        tokenized_data: dict[str, Any],
+    ) -> torch.Tensor:
+        """Compute the diffusion expert (flow matching) loss.
+
+        Runs the expert transformer on the VLM's KV cache + projected action
+        embeddings, and returns the flow matching MSE loss. The KV cache is
+        detached so gradients only flow through the expert/action_proj modules,
+        not back into the VLM.
+
+        This mirrors the SFT forward path in TrainableAlpamayo1_5 but is
+        adapted for the RL setting where the VLM forward has already been done
+        (we reuse the same VLM outputs from the GRPO token-level step).
+
+        Args:
+            vlm_outputs: VLM forward outputs (must have past_key_values and rope_deltas).
+            input_ids: The full input_ids sequence (including fused traj tokens).
+            traj_data: Dict with ego_history_xyz/rot and ego_future_xyz/rot.
+            tokenized_data: Remaining tokenized kwargs (pixel_values, etc.).
+
+        Returns:
+            Scalar flow matching MSE loss tensor.
+        """
+        batch_size = input_ids.shape[0]
+
+        # 1. Construct flow matching training data from ground-truth future trajectory
+        future_traj_data = self._process_traj_future_training(traj_data)
+
+        # 2. Project noisy action + timestep into expert token embeddings
+        action_embeds = self.action_in_proj(
+            future_traj_data["noisy_x"], future_traj_data["timesteps"]
+        )
+        expert_embeds = action_embeds
+
+        # 3. Crop KV cache to the last <traj_future_start> position
+        future_start_token_id = self.config.traj_token_ids["future_start"]
+        future_start_positions = (input_ids == future_start_token_id).nonzero(as_tuple=False)
+        if future_start_positions.numel() == 0:
+            logger.warning("[DiffusionRL] No <traj_future_start> found in input_ids; "
+                           "skipping diffusion expert loss.")
+            return torch.tensor(0.0, device=input_ids.device)
+        last_traj_future_start_idx = future_start_positions[-1, 1] + 1
+
+        kv_cache = vlm_outputs.past_key_values
+        # Clone KV cache before cropping so we don't mutate the one used by GRPO
+        kv_cache = kv_cache.clone()
+        kv_cache.crop(last_traj_future_start_idx)
+
+        # 4. Detach KV cache keys/values so gradient does NOT flow back to VLM
+        #    VLM gets its own independent gradient via GRPO token-level loss.
+        #    Expert gets gradient via advantage-weighted diffusion loss.
+        for layer in kv_cache.layers:
+            layer.keys = layer.keys.detach()
+            layer.values = layer.values.detach()
+
+        # 5. Compute position IDs for the expert (Qwen2.5-VL 3-component RoPE)
+        position_ids = torch.arange(expert_embeds.shape[1], device=expert_embeds.device)
+        position_ids = einops.repeat(position_ids, "l -> 3 b l", b=batch_size).clone()
+        delta = vlm_outputs.rope_deltas + kv_cache.get_seq_length()
+        position_ids += delta.to(position_ids.device)
+
+        # 6. Expert forward pass
+        forward_kwargs = {}
+        if self.config.expert_non_causal_attention:
+            forward_kwargs["is_causal"] = False
+        expert_outputs = self.expert(
+            inputs_embeds=expert_embeds,
+            position_ids=position_ids,
+            past_key_values=kv_cache,
+            attention_mask=None,
+            use_cache=True,
+            **forward_kwargs,
+        )
+
+        # 7. Project expert output back to action space and compute flow matching loss
+        diffusion_out = expert_outputs.last_hidden_state[:, -action_embeds.shape[1]:]
+        pred = self.action_out_proj(diffusion_out)
+        pred = pred.view(-1, *self.action_space.get_action_space_dims())
+        diffusion_loss = self.diffusion.compute_loss_from_pred(
+            training_data=future_traj_data,
+            pred=pred,
+        )
+
+        return diffusion_loss
+
     def forward(
         self,
         tokenized_data: dict[str, Any],
@@ -150,9 +267,24 @@ class RLWrapperReasoningVLA(ReasoningVLA):
         ego_future_xyz: torch.Tensor | None = None,
         ego_future_rot: torch.Tensor | None = None,
         labels_mask: torch.Tensor | None = None,
+        compute_diffusion_loss: bool = False,
         **kwargs: Any,
     ) -> ReasoningVLAOutput:
-        """Forward pass of the model."""
+        """Forward pass of the model.
+
+        Args:
+            tokenized_data: Tokenized input data dict.
+            ego_history_xyz: History trajectory xyz [B, n_traj_group, n_traj, 3].
+            ego_history_rot: History trajectory rotation [B, n_traj_group, n_traj, 4].
+            ego_future_xyz: Future trajectory xyz [B, n_traj_group, n_traj, 3].
+            ego_future_rot: Future trajectory rotation [B, n_traj_group, n_traj, 4].
+            labels_mask: Mask for which tokens to include in loss.
+            compute_diffusion_loss: If True, also compute diffusion expert loss
+                (advantage weighting is done by the trainer, not here).
+
+        Returns:
+            ReasoningVLAOutput with VLM loss, logits, and optionally diffusion_loss.
+        """
         # 1. tokenize trajectory and fuse into input_ids
         input_ids = tokenized_data.pop("input_ids")
         traj_data = {
@@ -169,8 +301,13 @@ class RLWrapperReasoningVLA(ReasoningVLA):
             labels = torch.where(labels_mask, labels, IGNORE_INDEX)
 
         # 3. vlm forward pass
+        # When compute_diffusion_loss=True, we need past_key_values for the expert,
+        # so pass use_cache=True. Otherwise, skip it to save memory.
+        vlm_kwargs = dict(tokenized_data)
+        if compute_diffusion_loss:
+            vlm_kwargs["use_cache"] = True
         try:
-            outputs = self.vlm(input_ids=input_ids, labels=labels, **tokenized_data)
+            outputs = self.vlm(input_ids=input_ids, labels=labels, **vlm_kwargs)
         except ValueError as e:
             import os
             rank = os.environ.get("RANK", "?")
@@ -210,9 +347,27 @@ class RLWrapperReasoningVLA(ReasoningVLA):
         # Replace the original loss
         outputs.loss = sum(losses.values())
 
+        # 4. Optionally compute diffusion expert loss
+        diffusion_loss = None
+        if compute_diffusion_loss and ego_future_xyz is not None and ego_future_rot is not None:
+            # VLM outputs must have past_key_values for diffusion expert path
+            if hasattr(outputs, "past_key_values") and outputs.past_key_values is not None:
+                diffusion_loss = self._compute_diffusion_expert_loss(
+                    vlm_outputs=outputs,
+                    input_ids=input_ids,
+                    traj_data=traj_data,
+                    tokenized_data=tokenized_data,
+                )
+            else:
+                logger.warning(
+                    "[DiffusionRL] VLM outputs lack past_key_values; "
+                    "cannot compute diffusion expert loss. Need use_cache=True."
+                )
+
         return ReasoningVLAOutput(
             loss=outputs.loss,
             logits=outputs.logits,
+            diffusion_loss=diffusion_loss,
         )
 
     def sample_trajectories_from_data(
