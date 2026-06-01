@@ -499,7 +499,20 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                                     "Pipeline Parallel is not supported for Reasoning VLA"
                                 )
                             else:
-                                model_out = self.model(**user_mini_batch)
+                                # GRPO forward does NOT need trajectory data —
+                                # rollout already fused traj tokens into input_ids.
+                                # The collated traj tensors are 5D ([batch,1,1,T,3])
+                                # which violates fuse_traj_tokens' 4D assertion.
+                                # Strip traj keys to avoid the shape mismatch.
+                                traj_keys = [
+                                    "ego_history_xyz", "ego_history_rot",
+                                    "ego_future_xyz", "ego_future_rot",
+                                ]
+                                grpo_kwargs = {
+                                    k: v for k, v in user_mini_batch.items()
+                                    if k not in traj_keys
+                                }
+                                model_out = self.model(**grpo_kwargs)
 
                                 if self.parallel_dims.cp_enabled:
                                     user_mini_batch["position_ids"] = position_ids_before_cp
