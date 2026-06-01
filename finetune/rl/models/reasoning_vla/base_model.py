@@ -294,10 +294,10 @@ class RLWrapperReasoningVLA(ReasoningVLA):
 
         Args:
             tokenized_data: Tokenized input data dict.
-            ego_history_xyz: History trajectory xyz [B, n_traj_group, n_traj, 3].
-            ego_history_rot: History trajectory rotation [B, n_traj_group, n_traj, 4].
-            ego_future_xyz: Future trajectory xyz [B, n_traj_group, n_traj, 3].
-            ego_future_rot: Future trajectory rotation [B, n_traj_group, n_traj, 4].
+            ego_history_xyz: History trajectory xyz [B, n_traj_group, T, 3].
+            ego_history_rot: History trajectory rotation [B, n_traj_group, T, 3, 3] (rotation matrix).
+            ego_future_xyz: Future trajectory xyz [B, n_traj_group, T, 3].
+            ego_future_rot: Future trajectory rotation [B, n_traj_group, T, 3, 3] (rotation matrix).
             labels_mask: Mask for which tokens to include in loss.
             compute_diffusion_loss: If True, also compute diffusion expert loss
                 (advantage weighting is done by the trainer, not here).

@@ -858,9 +858,9 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         min_advantage_threshold = float(diffusion_rl_cfg.get("min_advantage_threshold", -1.0))
 
         # 1. Extract trajectory tensors from processed samples
-        # Each processed_sample is a dict containing ego_future_xyz, ego_future_rot, etc.
-        # These were collated into user_mini_batch, but we need the raw per-sample tensors
-        # to reconstruct them for the diffusion forward pass.
+        # Dataset tensors are [1, 1, T, 3] for xyz and [1, 1, T, 3, 3] for rot (rotation matrix).
+        # We squeeze the B=1 and n_traj_group=1 dimensions from each sample,
+        # then stack the per-sample 2D/3D tensors to create proper batch tensors.
         ego_history_xyz_list = []
         ego_history_rot_list = []
         ego_future_xyz_list = []
@@ -868,30 +868,46 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
 
         for sample in minibatched_processed_samples:
             if isinstance(sample, dict):
-                # Ensure 4D shape: [B, n_traj_group, n_traj, dim]
                 h_xyz = sample.get("ego_history_xyz")
                 h_rot = sample.get("ego_history_rot")
                 f_xyz = sample.get("ego_future_xyz")
                 f_rot = sample.get("ego_future_rot")
 
                 if h_xyz is not None and f_xyz is not None:
-                    # Add n_traj_group dim if missing
-                    if h_xyz.dim() == 3:
-                        h_xyz = h_xyz.unsqueeze(1)
-                    if h_rot is not None and h_rot.dim() == 3:
-                        h_rot = h_rot.unsqueeze(1)
-                    if f_xyz.dim() == 3:
-                        f_xyz = f_xyz.unsqueeze(1)
-                    # ego_future_rot may be None for some datasets (no rotation GT)
-                    # When missing, create a unit quaternion [1,0,0,0] with matching shape
-                    if f_rot is None:
-                        f_xyz_batch = f_xyz.shape[0] if f_xyz.dim() == 4 else 1
-                        f_xyz_traj = f_xyz.shape[2] if f_xyz.dim() == 4 else f_xyz.shape[1]
-                        f_rot = torch.zeros(f_xyz_batch, 1, f_xyz_traj, 4,
+                    # Dataset provides xyz as [1, 1, T, 3] (4D) or [T, 3] (2D)
+                    # and rot as [1, 1, T, 3, 3] (5D, rotation matrix) or [T, 4] (2D, quaternion)
+                    # We squeeze leading dimensions to get core [T, 3] / [T, 3, 3] / [T, 4]
+                    # then stack will add the batch dimension correctly.
+                    if h_xyz.dim() >= 4:
+                        # Squeeze leading B and n_traj_group dims: [1, 1, T, 3] → [T, 3]
+                        h_xyz = h_xyz.squeeze(0).squeeze(0)
+                    if h_rot is not None and h_rot.dim() >= 5:
+                        # Squeeze leading dims: [1, 1, T, 3, 3] → [T, 3, 3]
+                        h_rot = h_rot.squeeze(0).squeeze(0)
+                    elif h_rot is not None and h_rot.dim() == 4:
+                        # [1, T, 3, 3] → [T, 3, 3]
+                        h_rot = h_rot.squeeze(0)
+                    elif h_rot is not None and h_rot.dim() == 3:
+                        # Could be [T, 3, 3] (rotation matrix) or [T, 4] (quaternion)
+                        # Keep as is — traj_to_action handles both
+                        pass
+                    if f_xyz.dim() >= 4:
+                        f_xyz = f_xyz.squeeze(0).squeeze(0)
+                    if f_rot is not None and f_rot.dim() >= 5:
+                        f_rot = f_rot.squeeze(0).squeeze(0)
+                    elif f_rot is not None and f_rot.dim() == 4:
+                        f_rot = f_rot.squeeze(0)
+                    elif f_rot is None:
+                        # ego_future_rot missing: create unit rotation matrix [T, 3, 3]
+                        T_steps = f_xyz.shape[0] if f_xyz.dim() == 2 else 1
+                        f_rot = torch.zeros(T_steps, 3, 3,
                                             dtype=f_xyz.dtype, device=f_xyz.device)
-                        f_rot[..., 0] = 1.0  # w component of unit quaternion
+                        f_rot[:, 0, 0] = 1.0  # Identity rotation matrix
+                        f_rot[:, 1, 1] = 1.0
+                        f_rot[:, 2, 2] = 1.0
                     elif f_rot.dim() == 3:
-                        f_rot = f_rot.unsqueeze(1)
+                        # [T, 3, 3] or [T, 4] — keep as is
+                        pass
 
                     ego_history_xyz_list.append(h_xyz)
                     ego_history_rot_list.append(h_rot)
@@ -899,8 +915,8 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                     ego_future_rot_list.append(f_rot)
                 else:
                     logger.warning(
-                        f"[DiffusionRL] step={current_step}: sample is not a dict, "
-                        f"cannot extract trajectory data. Skipping diffusion loss."
+                        f"[DiffusionRL] step={current_step}: sample missing "
+                        f"trajectory data. Skipping diffusion loss."
                     )
                     return
 
@@ -911,7 +927,11 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
             )
             return
 
-        # 2. Stack trajectory tensors into batch tensors
+        # 2. Stack per-sample tensors into batch tensors
+        # After squeeze, each tensor is [T, 3] for xyz, [T, 3, 3] for rot (rotation matrix).
+        # torch.stack adds batch dim at dim=0: → [B, T, 3] for xyz, [B, T, 3, 3] for rot.
+        # The model forward expects [B, n_traj_group, n_traj, 3] for xyz,
+        # so we add n_traj_group=1 and n_traj=1 via unsqueeze.
         try:
             ego_history_xyz = torch.stack(ego_history_xyz_list).to(self.device)
             ego_history_rot = torch.stack(ego_history_rot_list).to(self.device)
@@ -923,6 +943,18 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                 f"tensors: {e}. Skipping diffusion loss."
             )
             return
+
+        # Add n_traj_group and n_traj dims for model forward compatibility
+        # xyz: [B, T, 3] → [B, n_traj_group=1, n_traj=1, T, 3] is 5D...
+        # BUT fuse_traj_tokens expects [B, n_traj, T, 3] (4D) — so add one dim.
+        # rot: rotation matrix [B, T, 3, 3] → [B, n_traj, T, 3, 3] (5D)
+        # After fuse_traj_tokens flattens [B, n_traj] → [B*n_traj],
+        # _process_traj_future_training gets 4D [B*n_traj, T, 3] xyz
+        # and 5D [B*n_traj, T, 3, 3] rot, which traj_to_action expects.
+        ego_history_xyz = ego_history_xyz.unsqueeze(1)  # [B, T, 3] → [B, 1, T, 3]
+        ego_history_rot = ego_history_rot.unsqueeze(1)  # [B, T, D, D] → [B, 1, T, D, D]
+        ego_future_xyz = ego_future_xyz.unsqueeze(1)    # [B, T, 3] → [B, 1, T, 3]
+        ego_future_rot = ego_future_rot.unsqueeze(1)    # [B, T, D, D] → [B, 1, T, D, D]
 
         # 3. Reconstruct the tokenized_data dict for a second model forward
         # We need a fresh forward pass with use_cache=True to get past_key_values

@@ -263,7 +263,8 @@ echo "" | tee -a "$R"
 
 echo "=== 13. Quick Health Check ===" | tee -a "$R"
 if [ -f "$POLICY_LOG" ]; then
-  total_steps=$(grep -c "\[Step " "$POLICY_LOG" 2>/dev/null || echo "0")
+  total_steps=$(grep -c '\[Step ' "$POLICY_LOG" 2>/dev/null || echo 0)
+  total_steps=$(echo "$total_steps" | tr -d '[:space:]')
   echo "  Total steps: $total_steps" | tee -a "$R"
 
   if [ "$total_steps" -gt 0 ]; then
