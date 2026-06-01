@@ -874,6 +874,14 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
                 f_rot = sample.get("ego_future_rot")
 
                 if h_xyz is not None and f_xyz is not None:
+                    # DEBUG: log original tensor shapes to diagnose shape issues
+                    logger.warning(
+                        f"[DiffusionRL] step={current_step}: RAW shapes "
+                        f"h_xyz={h_xyz.shape if hasattr(h_xyz, 'shape') else type(h_xyz)} "
+                        f"h_rot={h_rot.shape if h_rot is not None and hasattr(h_rot, 'shape') else None} "
+                        f"f_xyz={f_xyz.shape if hasattr(f_xyz, 'shape') else type(f_xyz)} "
+                        f"f_rot={f_rot.shape if f_rot is not None and hasattr(f_rot, 'shape') else None}"
+                    )
                     # Dataset provides xyz as [1, 1, T, 3] (4D) or [T, 3] (2D)
                     # and rot as [1, 1, T, 3, 3] (5D, rotation matrix) or [T, 4] (2D, quaternion)
                     # We squeeze leading dimensions to get core [T, 3] / [T, 3, 3] / [T, 4]
@@ -955,6 +963,13 @@ class ReasoningVLAGRPOTrainer(AlpamayoGRPOTrainer):
         ego_history_rot = ego_history_rot.unsqueeze(1)  # [B, T, D, D] → [B, 1, T, D, D]
         ego_future_xyz = ego_future_xyz.unsqueeze(1)    # [B, T, 3] → [B, 1, T, 3]
         ego_future_rot = ego_future_rot.unsqueeze(1)    # [B, T, D, D] → [B, 1, T, D, D]
+
+        # DEBUG: log final shapes after squeeze+stack+unsqueeze
+        logger.warning(
+            f"[DiffusionRL] step={current_step}: FINAL shapes "
+            f"h_xyz={ego_history_xyz.shape} h_rot={ego_history_rot.shape} "
+            f"f_xyz={ego_future_xyz.shape} f_rot={ego_future_rot.shape}"
+        )
 
         # 3. Reconstruct the tokenized_data dict for a second model forward
         # We need a fresh forward pass with use_cache=True to get past_key_values
