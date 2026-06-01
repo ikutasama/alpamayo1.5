@@ -189,7 +189,7 @@ class RLWrapperReasoningVLA(ReasoningVLA):
         (we reuse the same VLM outputs from the GRPO token-level step).
 
         Args:
-            vlm_outputs: VLM forward outputs (must have past_key_values and rope_deltas).
+            vlm_outputs: VLM forward outputs (must have past_key_values).
             input_ids: The full input_ids sequence (including fused traj tokens).
             traj_data: Dict with ego_history_xyz/rot and ego_future_xyz/rot.
             tokenized_data: Remaining tokenized kwargs (pixel_values, etc.).
@@ -208,34 +208,49 @@ class RLWrapperReasoningVLA(ReasoningVLA):
         )
         expert_embeds = action_embeds
 
-        # 3. Crop KV cache to the last <traj_future_start> position
+        # 3. Locate <traj_future_start> position in input_ids
         future_start_token_id = self.config.traj_token_ids["future_start"]
         future_start_positions = (input_ids == future_start_token_id).nonzero(as_tuple=False)
         if future_start_positions.numel() == 0:
             logger.warning("[DiffusionRL] No <traj_future_start> found in input_ids; "
                            "skipping diffusion expert loss.")
-            return torch.tensor(0.0, device=input_ids.device)
+            return torch.tensor(0.0, device=input_ids.device, requires_grad=True)
+        # Take the LAST occurrence (in case history traj also has the token)
         last_traj_future_start_idx = future_start_positions[-1, 1] + 1
 
+        # 4. Get KV cache and crop to <traj_future_start> position
         kv_cache = vlm_outputs.past_key_values
-        # Clone KV cache before cropping so we don't mutate the one used by GRPO
-        kv_cache = kv_cache.clone()
+        # NOTE: We do NOT clone the KV cache. Instead we crop in-place and then
+        # detach keys/values. After the expert forward, we restore the KV cache
+        # to its original length so it doesn't affect subsequent operations.
+        # This matches the SFT pattern in TrainableAlpamayo1_5.forward().
+        original_kv_seq_len = kv_cache.get_seq_length()
         kv_cache.crop(last_traj_future_start_idx)
 
-        # 4. Detach KV cache keys/values so gradient does NOT flow back to VLM
+        # 5. Detach KV cache keys/values so gradient does NOT flow back to VLM
         #    VLM gets its own independent gradient via GRPO token-level loss.
         #    Expert gets gradient via advantage-weighted diffusion loss.
         for layer in kv_cache.layers:
             layer.keys = layer.keys.detach()
             layer.values = layer.values.detach()
 
-        # 5. Compute position IDs for the expert (Qwen2.5-VL 3-component RoPE)
+        # 6. Compute position IDs for the expert (Qwen2.5-VL 3-component RoPE)
+        #    Same as SFT: position_ids = arange(n_tokens) + rope_deltas + kv_seq_len
         position_ids = torch.arange(expert_embeds.shape[1], device=expert_embeds.device)
         position_ids = einops.repeat(position_ids, "l -> 3 b l", b=batch_size).clone()
-        delta = vlm_outputs.rope_deltas + kv_cache.get_seq_length()
-        position_ids += delta.to(position_ids.device)
+        # rope_deltas is set by Qwen2.5-VL during forward when use_cache=True
+        rope_deltas = getattr(vlm_outputs, "rope_deltas", None)
+        if rope_deltas is not None:
+            delta = rope_deltas + kv_cache.get_seq_length()
+            position_ids += delta.to(position_ids.device)
+        else:
+            # Fallback: no rope_deltas (rare, but happens if VLM model doesn't expose it)
+            # Use the cropped KV cache length as offset
+            logger.warning("[DiffusionRL] No rope_deltas in VLM outputs; using "
+                           "KV cache seq_len as position offset.")
+            position_ids += kv_cache.get_seq_length()
 
-        # 6. Expert forward pass
+        # 7. Expert forward pass
         forward_kwargs = {}
         if self.config.expert_non_causal_attention:
             forward_kwargs["is_causal"] = False
@@ -248,7 +263,7 @@ class RLWrapperReasoningVLA(ReasoningVLA):
             **forward_kwargs,
         )
 
-        # 7. Project expert output back to action space and compute flow matching loss
+        # 8. Project expert output back to action space and compute flow matching loss
         diffusion_out = expert_outputs.last_hidden_state[:, -action_embeds.shape[1]:]
         pred = self.action_out_proj(diffusion_out)
         pred = pred.view(-1, *self.action_space.get_action_space_dims())
@@ -256,6 +271,11 @@ class RLWrapperReasoningVLA(ReasoningVLA):
             training_data=future_traj_data,
             pred=pred,
         )
+
+        # 9. Restore KV cache to original length (undo crop for safety)
+        #    The KV cache is shared with the VLM outputs; restoring prevents
+        #    side-effects on any downstream code that reads vlm_outputs.
+        kv_cache.crop(original_kv_seq_len)
 
         return diffusion_loss
 
