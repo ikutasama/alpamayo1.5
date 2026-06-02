@@ -133,6 +133,7 @@ class RVLACosmos(BaseCosmosWrapper):
             ego_future_xyz=kwargs.get("ego_future_xyz", None),
             ego_future_rot=kwargs.get("ego_future_rot", None),
             labels_mask=labels_mask,
+            compute_diffusion_loss=kwargs.get("compute_diffusion_loss", False),
         )
         return outputs
 
