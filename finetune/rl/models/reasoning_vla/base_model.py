@@ -321,25 +321,28 @@ class RLWrapperReasoningVLA(ReasoningVLA):
             labels = torch.where(labels_mask, labels, IGNORE_INDEX)
 
 # 3. vlm forward pass
-        # When compute_diffusion_loss=True, we need past_key_values for the expert,
-        # so pass use_cache=True. Otherwise, skip it to save memory.
-        # CRITICAL: Gradient checkpointing suppresses past_key_values from VLM outputs.
-        # Since the KV cache is detached (no gradient flow to VLM through it anyway),
-        # we run the VLM in torch.no_grad() to bypass gradient checkpointing's
-        # past_key_values suppression AND save memory (no intermediate activation storage).
+        # Normal path: GRPO forward with gradient checkpointing, no KV cache needed.
+        # Diffusion path: Need past_key_values for the expert. CRITICAL issue:
+        #   torch.utils.checkpoint.checkpoint() DROPS non-tensor outputs like
+        #   past_key_values regardless of no_grad mode. So we must temporarily
+        #   disable gradient checkpointing on the VLM, then run forward in
+        #   no_grad (VLM gradients come from GRPO, not from this forward).
+        #   This is memory-safe: no_grad means no intermediate activations stored.
         vlm_kwargs = dict(tokenized_data)
         if compute_diffusion_loss:
-            # Gradient checkpointing suppresses past_key_values in output.
-            # Since VLM gradients come from the GRPO forward and KV cache is
-            # detached in _compute_diffusion_expert_loss, we don't need
-            # VLM gradient tracking here. Run VLM in no_grad to:
-            #   1) Bypass checkpointing's past_key_values suppression
-            #   2) Save memory (no intermediate activations stored)
-            #   3) KV cache is returned normally
-            # Also skip VLM labels since GRPO handles them.
             vlm_kwargs["use_cache"] = True
+            # Temporarily disable gradient checkpointing — it drops past_key_values
+            checkpointing_was_enabled = (
+                hasattr(self.vlm, "is_gradient_checkpointing")
+                and self.vlm.is_gradient_checkpointing
+            )
+            if checkpointing_was_enabled:
+                self.vlm.gradient_checkpointing_disable()
             with torch.no_grad():
                 outputs = self.vlm(input_ids=input_ids, labels=None, **vlm_kwargs)
+            # Re-enable gradient checkpointing immediately
+            if checkpointing_was_enabled:
+                self.vlm.gradient_checkpointing_enable()
         else:
             try:
                 outputs = self.vlm(input_ids=input_ids, labels=labels, **vlm_kwargs)
@@ -359,28 +362,34 @@ class RLWrapperReasoningVLA(ReasoningVLA):
                 print(f"[DEBUG] Crash at rank={rank}: input_ids.shape={input_ids.shape}, image_pad_count={img_tok_count}, pixel_values={pv_shape}, image_grid_thw={gt_val}, keys={list(tokenized_data.keys())}")
                 raise
 
-        losses = {}
-        # Identify trajectory tokens (tokens between traj_future and next special token)
-        traj_mask = (
-            (
-                (labels >= self.future_token_start_idx)
-                & (labels < self.future_token_start_idx + self.config.traj_vocab_size)
+        # Compute VLM loss only for GRPO path (when not computing diffusion loss).
+        # For diffusion path, VLM loss is meaningless (no_grad logits = no gradient),
+        # and GRPO already handles VLM gradients via its own forward.
+        if compute_diffusion_loss:
+            outputs.loss = torch.tensor(0.0, device=input_ids.device)
+        else:
+            losses = {}
+            # Identify trajectory tokens (tokens between traj_future and next special token)
+            traj_mask = (
+                (
+                    (labels >= self.future_token_start_idx)
+                    & (labels < self.future_token_start_idx + self.config.traj_vocab_size)
+                )
+                | (labels == self.special_token_ids["traj_future_start"])
+                | (labels == self.special_token_ids["traj_future_end"])
             )
-            | (labels == self.special_token_ids["traj_future_start"])
-            | (labels == self.special_token_ids["traj_future_end"])
-        )
-        losses["future_traj"] = self._compute_next_token_loss(
-            outputs, labels, traj_mask
-        ) * self.config.loss_weights.get("future_traj", 1.0)
-        labels[traj_mask] = IGNORE_INDEX
+            losses["future_traj"] = self._compute_next_token_loss(
+                outputs, labels, traj_mask
+            ) * self.config.loss_weights.get("future_traj", 1.0)
+            labels[traj_mask] = IGNORE_INDEX
 
-        # Include all other tokens in the loss
-        losses["others"] = self._compute_next_token_loss(
-            outputs, labels, labels != IGNORE_INDEX
-        ) * self.config.loss_weights.get("others", 1.0)
+            # Include all other tokens in the loss
+            losses["others"] = self._compute_next_token_loss(
+                outputs, labels, labels != IGNORE_INDEX
+            ) * self.config.loss_weights.get("others", 1.0)
 
-        # Replace the original loss
-        outputs.loss = sum(losses.values())
+            # Replace the original loss
+            outputs.loss = sum(losses.values())
 
         # 4. Optionally compute diffusion expert loss
         diffusion_loss = None
