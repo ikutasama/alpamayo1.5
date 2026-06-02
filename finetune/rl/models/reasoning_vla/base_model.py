@@ -320,29 +320,44 @@ class RLWrapperReasoningVLA(ReasoningVLA):
         if labels_mask is not None:
             labels = torch.where(labels_mask, labels, IGNORE_INDEX)
 
-        # 3. vlm forward pass
+# 3. vlm forward pass
         # When compute_diffusion_loss=True, we need past_key_values for the expert,
         # so pass use_cache=True. Otherwise, skip it to save memory.
+        # CRITICAL: Gradient checkpointing suppresses past_key_values from VLM outputs.
+        # Since the KV cache is detached (no gradient flow to VLM through it anyway),
+        # we run the VLM in torch.no_grad() to bypass gradient checkpointing's
+        # past_key_values suppression AND save memory (no intermediate activation storage).
         vlm_kwargs = dict(tokenized_data)
         if compute_diffusion_loss:
+            # Gradient checkpointing suppresses past_key_values in output.
+            # Since VLM gradients come from the GRPO forward and KV cache is
+            # detached in _compute_diffusion_expert_loss, we don't need
+            # VLM gradient tracking here. Run VLM in no_grad to:
+            #   1) Bypass checkpointing's past_key_values suppression
+            #   2) Save memory (no intermediate activations stored)
+            #   3) KV cache is returned normally
+            # Also skip VLM labels since GRPO handles them.
             vlm_kwargs["use_cache"] = True
-        try:
-            outputs = self.vlm(input_ids=input_ids, labels=labels, **vlm_kwargs)
-        except ValueError as e:
-            import os
-            rank = os.environ.get("RANK", "?")
-            img_tok_id = None
-            if hasattr(self.vlm, "config") and hasattr(self.vlm.config, "image_token_id"):
-                img_tok_id = self.vlm.config.image_token_id
-                img_tok_count = (input_ids == img_tok_id).sum().item()
-            else:
-                img_tok_count = "N/A"
-            pv = tokenized_data.get("pixel_values")
-            gt = tokenized_data.get("image_grid_thw")
-            pv_shape = pv.shape if pv is not None and hasattr(pv, "shape") else type(pv)
-            gt_val = gt.tolist() if gt is not None and hasattr(gt, "tolist") else type(gt)
-            print(f"[DEBUG] Crash at rank={rank}: input_ids.shape={input_ids.shape}, image_pad_count={img_tok_count}, pixel_values={pv_shape}, image_grid_thw={gt_val}, keys={list(tokenized_data.keys())}")
-            raise
+            with torch.no_grad():
+                outputs = self.vlm(input_ids=input_ids, labels=None, **vlm_kwargs)
+        else:
+            try:
+                outputs = self.vlm(input_ids=input_ids, labels=labels, **vlm_kwargs)
+            except ValueError as e:
+                import os
+                rank = os.environ.get("RANK", "?")
+                img_tok_id = None
+                if hasattr(self.vlm, "config") and hasattr(self.vlm.config, "image_token_id"):
+                    img_tok_id = self.vlm.config.image_token_id
+                    img_tok_count = (input_ids == img_tok_id).sum().item()
+                else:
+                    img_tok_count = "N/A"
+                pv = tokenized_data.get("pixel_values")
+                gt = tokenized_data.get("image_grid_thw")
+                pv_shape = pv.shape if pv is not None and hasattr(pv, "shape") else type(pv)
+                gt_val = gt.tolist() if gt is not None and hasattr(gt, "tolist") else type(gt)
+                print(f"[DEBUG] Crash at rank={rank}: input_ids.shape={input_ids.shape}, image_pad_count={img_tok_count}, pixel_values={pv_shape}, image_grid_thw={gt_val}, keys={list(tokenized_data.keys())}")
+                raise
 
         losses = {}
         # Identify trajectory tokens (tokens between traj_future and next special token)
@@ -372,6 +387,12 @@ class RLWrapperReasoningVLA(ReasoningVLA):
         if compute_diffusion_loss and ego_future_xyz is not None and ego_future_rot is not None:
             # VLM outputs must have past_key_values for diffusion expert path
             if hasattr(outputs, "past_key_values") and outputs.past_key_values is not None:
+                pkv_layers = len(outputs.past_key_values)
+                pkv_seq = outputs.past_key_values[0].key.shape[2] if pkv_layers > 0 else 0
+                logger.warning(
+                    f"[DiffusionRL] VLM past_key_values available: "
+                    f"layers={pkv_layers}, seq_len={pkv_seq}"
+                )
                 diffusion_loss = self._compute_diffusion_expert_loss(
                     vlm_outputs=outputs,
                     input_ids=input_ids,
