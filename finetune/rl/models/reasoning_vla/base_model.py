@@ -116,12 +116,15 @@ class RLWrapperReasoningVLA(ReasoningVLA):
             out_features=self.action_space.get_action_space_dims()[-1],
         )
 
-        # Convert action-related modules to the same dtype as expert
-        expert_dtype = self.expert.dtype
-        if getattr(config, "keep_same_dtype", True):
-            self.diffusion = self.diffusion.to(dtype=expert_dtype)
-            self.action_in_proj = self.action_in_proj.to(dtype=expert_dtype)
-            self.action_out_proj = self.action_out_proj.to(dtype=expert_dtype)
+        # Convert ALL diffusion sub-modules to bfloat16 (FSDP2 requires uniform dtype)
+        # Expert is float32 by default from AutoModel.from_config; action_space buffers
+        # are also float32 from register_buffer. Must match VLM backbone dtype.
+        target_dtype = torch.bfloat16
+        self.expert = self.expert.to(dtype=target_dtype)
+        self.action_space = self.action_space.to(dtype=target_dtype)
+        self.diffusion = self.diffusion.to(dtype=target_dtype)
+        self.action_in_proj = self.action_in_proj.to(dtype=target_dtype)
+        self.action_out_proj = self.action_out_proj.to(dtype=target_dtype)
 
     def gradient_checkpointing_enable(
         self, gradient_checkpointing_kwargs: dict[str, Any] | None = None
