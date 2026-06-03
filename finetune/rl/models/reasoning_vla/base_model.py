@@ -59,7 +59,69 @@ class RLWrapperReasoningVLA(ReasoningVLA):
         print_param_count: bool = True,
     ) -> None:
         """Initialize the model."""
-        super().__init__(config)
+        super().__init__(config, pretrained_modules, original_vocab_size, print_param_count)
+
+        # Initialize diffusion-expert sub-modules (same as Alpamayo1_5)
+        # These are needed when compute_diffusion_loss=True in RL training.
+        # Config fields (action_space_cfg etc.) are stored as plain dicts from
+        # checkpoint config.json; convert to OmegaConf for hydra instantiate.
+        import copy
+        import hydra.utils as hyu
+        from omegaconf import OmegaConf
+        from alpamayo1_5.action_space import ActionSpace
+        from alpamayo1_5.diffusion.base import BaseDiffusion
+
+        # Expert transformer (same architecture as VLM text backbone, no embed_tokens)
+        expert_config = copy.deepcopy(self.vlm.config.text_config)
+        if getattr(config, "expert_cfg", None) is not None:
+            for key, value in config.expert_cfg.items():
+                setattr(expert_config, key, value)
+        # The diffusion expert does not support FlashAttention 2.
+        if getattr(expert_config, "_attn_implementation", "flash_attention_2") == "flash_attention_2":
+            expert_config._attn_implementation = "sdpa"
+        self.expert = AutoModel.from_config(expert_config)
+        del self.expert.embed_tokens
+
+        # Action space (traj → action vector transformation)
+        as_cfg = config.action_space_cfg
+        if not OmegaConf.is_config(as_cfg):
+            as_cfg = OmegaConf.create(as_cfg)
+        self.action_space: ActionSpace = hyu.instantiate(as_cfg)
+
+        # Diffusion module (flow matching)
+        diff_cfg = config.diffusion_cfg
+        if not OmegaConf.is_config(diff_cfg):
+            diff_cfg = OmegaConf.create(diff_cfg)
+        self.diffusion: BaseDiffusion = hyu.instantiate(
+            diff_cfg,
+            x_dims=self.action_space.get_action_space_dims(),
+        )
+
+        # Action projection layers (noisy_x/t → expert embeds, expert hidden → action)
+        inp_cfg = config.action_in_proj_cfg
+        if not OmegaConf.is_config(inp_cfg):
+            inp_cfg = OmegaConf.create(inp_cfg)
+        self.action_in_proj = hyu.instantiate(
+            inp_cfg,
+            in_dims=self.action_space.get_action_space_dims(),
+            out_dim=expert_config.hidden_size,
+        )
+
+        outp_cfg = config.action_out_proj_cfg
+        if not OmegaConf.is_config(outp_cfg):
+            outp_cfg = OmegaConf.create(outp_cfg)
+        self.action_out_proj = hyu.instantiate(
+            outp_cfg,
+            in_features=expert_config.hidden_size,
+            out_features=self.action_space.get_action_space_dims()[-1],
+        )
+
+        # Convert action-related modules to the same dtype as expert
+        expert_dtype = self.expert.dtype
+        if getattr(config, "keep_same_dtype", True):
+            self.diffusion = self.diffusion.to(dtype=expert_dtype)
+            self.action_in_proj = self.action_in_proj.to(dtype=expert_dtype)
+            self.action_out_proj = self.action_out_proj.to(dtype=expert_dtype)
 
     def gradient_checkpointing_enable(
         self, gradient_checkpointing_kwargs: dict[str, Any] | None = None
