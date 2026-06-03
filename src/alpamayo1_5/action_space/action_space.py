@@ -13,17 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from abc import ABC, abstractmethod
 from typing import Any
 
 import torch
 from torch import nn
 
 
-class ActionSpace(ABC, nn.Module):
-    """Action space base class for the trajectory generation."""
+class ActionSpace(nn.Module):
+    """Action space base class for the trajectory generation.
 
-    @abstractmethod
+    NOTE: ABC inheritance removed for FSDP2 compatibility.
+    FSDP2's fully_shard() creates a dynamic proxy class via type(),
+    which is incompatible with ABCMeta (C-level object layout mismatch).
+    Subclasses still implement all required methods; the @abstractmethod
+    contract is enforced by raise NotImplementedError at runtime.
+    """
+
     def traj_to_action(
         self,
         traj_history_xyz: torch.Tensor,
@@ -46,8 +51,8 @@ class ActionSpace(ABC, nn.Module):
         Returns:
             action: (..., *action_space_dims)
         """
+        raise NotImplementedError
 
-    @abstractmethod
     def action_to_traj(
         self,
         action: torch.Tensor,
@@ -69,14 +74,15 @@ class ActionSpace(ABC, nn.Module):
             traj_future_xyz: (..., T, 3)
             traj_future_rot: (..., T, 3, 3)
         """
+        raise NotImplementedError
 
-    @abstractmethod
     def get_action_space_dims(self) -> tuple[int, ...]:
         """Get the dimensions of the action space.
 
         Returns:
             action_space_dims: the action space dimensions
         """
+        raise NotImplementedError
 
     def is_within_bounds(self, action: torch.Tensor) -> torch.Tensor:
         """Check if the action is within the bounds.

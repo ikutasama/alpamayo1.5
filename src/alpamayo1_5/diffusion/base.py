@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import logging
-from abc import ABC, abstractmethod
 from typing import Protocol
 
 import torch
@@ -42,8 +41,15 @@ class StepFn(Protocol):
         ...
 
 
-class BaseDiffusion(ABC, nn.Module):
-    """Base class for diffusion models."""
+class BaseDiffusion(nn.Module):
+    """Base class for diffusion models.
+
+    NOTE: ABC inheritance removed for FSDP2 compatibility.
+    FSDP2's fully_shard() creates a dynamic proxy class via type(),
+    which is incompatible with ABCMeta (C-level object layout mismatch).
+    Subclasses still implement all required methods; the @abstractmethod
+    contract is enforced by raise NotImplementedError at runtime.
+    """
 
     def __init__(
         self,
@@ -61,7 +67,6 @@ class BaseDiffusion(ABC, nn.Module):
         self.x_dims = [x_dims] if isinstance(x_dims, int) else list(x_dims)
         self.use_classifier_free_guidance = use_classifier_free_guidance
 
-    @abstractmethod
     @torch.no_grad()
     def sample(
         self,
