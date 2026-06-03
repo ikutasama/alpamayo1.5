@@ -114,7 +114,10 @@ class RVLACosmos(BaseCosmosWrapper):
 
         # FSDP2 path: also ensure uniform dtype before sharding
         self.reasoning_vla = self.reasoning_vla.to(dtype=torch.bfloat16)
-        copy_state_into_dtensor_shards(self.reasoning_vla, ckpt_state, strict=True)
+        # Pad checkpoint tensors to match FSDP2-padded DTensor global shapes.
+        # Without pad_to_match, distribute_tensor fails when src.shape != DTensor.global_shape
+        # due to FSDP2 padding (vocab_size not divisible by DP world_size).
+        copy_state_into_dtensor_shards(self.reasoning_vla, ckpt_state, strict=True, pad_to_match=True)
 
     def forward(
         self,
