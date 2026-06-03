@@ -86,10 +86,16 @@ class RVLACosmos(BaseCosmosWrapper):
 
         if not detect_fsdp2_active(self.reasoning_vla):
             self.reasoning_vla.load_state_dict(ckpt_state, strict=True)
+            # FSDP2 requires uniform dtype; load_state_dict preserves destination dtype
+            # (VLM backbone is float32 from AutoModel.from_config). Convert entire model
+            # to bfloat16 after loading to match the checkpoint's dtype.
+            self.reasoning_vla = self.reasoning_vla.to(dtype=torch.bfloat16)
             if device is not None:
                 self.reasoning_vla = self.reasoning_vla.to(device)
             return
 
+        # FSDP2 path: also ensure uniform dtype before sharding
+        self.reasoning_vla = self.reasoning_vla.to(dtype=torch.bfloat16)
         copy_state_into_dtensor_shards(self.reasoning_vla, ckpt_state, strict=True)
 
     def forward(
