@@ -39,12 +39,30 @@ class RVLACosmos(BaseCosmosWrapper):
         return ["alpamayo_reasoning_vla"]
 
     def _apply_fsdp2(self, dp_mesh, fsdp_config: dict, reshard_fn) -> None:
-        """Shard visual tower, LM layers, and the top-level module with FSDP2."""
+        """Shard visual tower, LM layers, expert layers, and the top-level module with FSDP2.
+
+        Expert/diffusion/action_proj modules must be individually sharded
+        (like VLM layers) so they don't pollute the top-level flat parameter
+        group, which would break the policy→rollout weight sync.
+        """
         from torch.distributed.fsdp import fully_shard
 
         rvla = self.reasoning_vla
         shard_visual_tower(rvla, fsdp_config, reshard_fn, model_name="ReasoningVLA")
         shard_lm_layers(rvla, fsdp_config, reshard_fn, model_name="ReasoningVLA")
+
+        # Shard expert transformer layers individually (same pattern as LM layers)
+        if hasattr(rvla, "expert") and hasattr(rvla.expert, "layers"):
+            for idx, blk in enumerate(rvla.expert.layers):
+                fully_shard(blk, **fsdp_config, reshard_after_forward=True)
+            fully_shard(rvla.expert, **fsdp_config, reshard_after_forward=True)
+
+        # Shard diffusion and action projection modules individually
+        for mod_name in ("diffusion", "action_in_proj", "action_out_proj", "action_space"):
+            mod = getattr(rvla, mod_name, None)
+            if mod is not None:
+                fully_shard(mod, **fsdp_config, reshard_after_forward=True)
+
         fully_shard(self, **fsdp_config, reshard_after_forward=True)
 
     def get_position_ids(self, **kwargs) -> tuple[torch.Tensor, torch.Tensor, int]:
