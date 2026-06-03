@@ -397,7 +397,12 @@ class RLWrapperReasoningVLA(ReasoningVLA):
             # VLM outputs must have past_key_values for diffusion expert path
             if hasattr(outputs, "past_key_values") and outputs.past_key_values is not None:
                 pkv_layers = len(outputs.past_key_values)
-                pkv_seq = outputs.past_key_values[0].key.shape[2] if pkv_layers > 0 else 0
+                pkv_first = outputs.past_key_values[0]
+                # DynamicCache has .key attr; legacy tuple format is (key, value)
+                if hasattr(pkv_first, "key"):
+                    pkv_seq = pkv_first.key.shape[2]
+                else:
+                    pkv_seq = pkv_first[0].shape[2]  # tuple: (key_tensor, value_tensor)
                 logger.warning(
                     f"[DiffusionRL] VLM past_key_values available: "
                     f"layers={pkv_layers}, seq_len={pkv_seq}"
