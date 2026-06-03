@@ -305,18 +305,18 @@ def compute_hcc_v2_reward(
     s4_traj = float(math.exp(-l2_dist / 2.0))
 
     # Comfort is handled SEPARATELY as a penalty (not mixed into traj normalization)
-    # comfort_score ∈ [0,1] → comfort_norm ∈ [-1,0]
-    # We convert it to a penalty in [-1, 0] that subtracts from final reward
     comfort_penalty_weight = w.get("comfort_weight", 0.1)
     comfort_norm = comfort_score - 1.0  # ∈ [-1, 0]
-    # min(0, comfort_norm) ensures comfort only penalizes (never boosts)
-    # Result ∈ [-1, 0]: bad comfort → -1, perfect comfort → 0
     comfort_contribution = comfort_penalty_weight * min(0.0, comfort_norm)
 
-    # Normalize traj to [-1, 1] like other layers: s4_traj ∈ [0,1] → s4_norm ∈ [-1,1]
-    # Bad trajectory (large l2) → s4_traj≈0 → s4_norm≈-1 (strong negative signal)
-    # Good trajectory (small l2) → s4_traj≈1 → s4_norm≈+1
-    s4_norm = 2.0 * s4_traj - 1.0
+    # TRAJ REWARD DESIGN: half-range [0,1] instead of full [-1,1]
+    # Reason: with traj_w=0.45, s4_norm∈[-1,1] makes bad traj produce extreme
+    # negative reward (-0.45 per sample), crushing all other signal. Model sees
+    # no positive gradient path ("improve traj from -0.7 to -0.5 is still bad").
+    # Half-range [0,1] means: bad traj → 0 (neutral, no punishment), good traj
+    # → positive reward. Model learns: "improving trajectory earns reward".
+    # This preserves the directional signal while avoiding reward collapse.
+    s4_norm = s4_traj  # [0, 1] half-range for trajectory
 
     # ============================================================
     # Aggregate: Weighted additive formula

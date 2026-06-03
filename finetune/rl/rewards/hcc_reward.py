@@ -487,8 +487,8 @@ def compute_hcc_reward(
     s4_traj = float(__import__('math').exp(-l2_dist / 2.0))
     s4_comfort = comfort_score_norm
 
-    # Normalize traj to [-1, 1] (same fix as v2)
-    s4_norm = 2.0 * s4_traj - 1.0  # maps [0,1] -> [-1,1]
+    # Half-range [0,1] for traj (same as v2) — avoid reward collapse
+    s4_norm = s4_traj  # [0, 1] half-range
     # Comfort: independent penalty (only penalizes bad comfort, never boosts)
     comfort_contribution = 0.1 * min(0.0, comfort_score - 1.0)
 
