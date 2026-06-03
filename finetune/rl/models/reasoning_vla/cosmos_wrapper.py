@@ -79,7 +79,7 @@ class RVLACosmos(BaseCosmosWrapper):
     ):
         """Load checkpoint weights into self.reasoning_vla."""
         ckpt_model = RLWrapperReasoningVLA.from_pretrained(
-            model_name_or_path, trust_remote_code=True
+            model_name_or_path, trust_remote_code=True, torch_dtype=torch.bfloat16
         ).to("cpu")
         ckpt_state = ckpt_model.state_dict()
         del ckpt_model
